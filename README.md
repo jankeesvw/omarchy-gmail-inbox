@@ -41,7 +41,7 @@ reading the inbox is not enough, marking a message as read is a write.
 
 Check it with `gws auth status` - `"token_valid": true` means you are set.
 
-[gws]: https://github.com/googleworkspace/google-workspace-cli
+[gws]: https://github.com/googleworkspace/cli
 
 ## Install
 
