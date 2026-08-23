@@ -103,11 +103,18 @@ Panel {
   implicitWidth: bar && bar.vertical ? (bar ? bar.barSize : Style.bar.sizeHorizontal) : barSlot
   implicitHeight: bar && bar.vertical ? barSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal)
 
+  // Page tokens are opaque and come back from the API, so they are input like
+  // any other. The script checks them too; this is the near end of the same
+  // fence.
+  function validToken(t) {
+    return /^[A-Za-z0-9_-]{1,512}$/.test(String(t))
+  }
+
   function refresh() {
     if (listProc.running) return
     var argv = [root.script, "list"]
     if (unreadOnly) argv.push("--unread")
-    if (pageToken !== "") argv.push("--page", pageToken)
+    if (pageToken !== "" && validToken(pageToken)) argv.push("--page", pageToken)
     listProc.command = argv
     listProc.running = true
   }
@@ -299,7 +306,7 @@ Panel {
       unread = data.unread || 0
       total = data.total || 0
       email = data.email || ""
-      nextPage = data.nextPage || ""
+      nextPage = validToken(data.nextPage) ? data.nextPage : ""
       if (cursor > messages.length - 1) cursor = messages.length - 1
     } catch (e) {
       reachable = false
