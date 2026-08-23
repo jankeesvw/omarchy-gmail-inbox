@@ -110,7 +110,7 @@ from your shell process to a server the sender picked.
 
 ```bash
 bin/gmail-inbox demo on     # a plain inbox, for showing what a row is made of
-bin/gmail-inbox demo fun    # the one written for posting: it is all jokes
+bin/gmail-inbox demo fun    # real GitHub notifications from public repositories
 bin/gmail-inbox demo off
 ```
 
