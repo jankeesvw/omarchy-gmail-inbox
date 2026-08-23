@@ -5,6 +5,8 @@
   "version": "1.0.0",
   "author": "Jankees",
   "description": "Unread count in the bar, with the inbox in a panel",
+  "homepage": "https://github.com/jankeesvw/omarchy-gmail-inbox",
+  "license": "MIT",
   "kinds": [
     "bar-widget"
   ],
