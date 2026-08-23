@@ -99,6 +99,16 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 
 private_dir "$CACHE_DIR" || die "cache directory is not usable"
 
+# A cache file that is not a JSON object takes jq down with it, and --slurpfile
+# fails the whole run rather than the one lookup. That would leave the widget
+# permanently broken over a file it can perfectly well rebuild, so check the
+# shape once and start over when it is wrong.
+ensure_json_object() {
+  local file="$1"
+  [ -r "$file" ] && jq -e 'type == "object"' -- "$file" >/dev/null 2>&1 && return 0
+  printf '{}\n' > "$file"
+}
+
 demo_on() { [ -e "$DEMO_FILE" ]; }
 
 demo_on || command -v gws >/dev/null 2>&1 || die "gws not found on PATH — see the README"
@@ -128,12 +138,30 @@ account_email() {
 # ------------------------------------------------------------------- list
 
 cmd_list() {
-  local max triage messages unread email
+  local max triage notice errfile messages unread email
   max="$(max_messages)"
 
-  triage="$(gws_gmail +triage --query "$QUERY" --max "$max" --labels --format json)"
+  # An empty result is not an error, but +triage reports it as a plain-text
+  # line on stderr and still exits 0, leaving stdout empty. Keep that stream
+  # rather than discarding it: without it an empty inbox — the one case where
+  # you most want to believe the widget — reads as an unreachable account.
+  errfile="$(mktemp "${TMPDIR:-/tmp}/omarchy-gmail-inbox-err.XXXXXX")" || errfile=""
+  if [ -n "$errfile" ]; then
+    triage="$(gws gmail +triage --query "$QUERY" --max "$max" --labels --format json 2>"$errfile")"
+    notice="$(cat -- "$errfile" 2>/dev/null)"
+    rm -f -- "$errfile"
+  else
+    triage="$(gws_gmail +triage --query "$QUERY" --max "$max" --labels --format json)"
+    notice=""
+  fi
+
   messages="$(printf '%s' "$triage" | jq -c '[.messages[]?]' 2>/dev/null)"
-  [ -n "$messages" ] || die "could not read the inbox — is gws authenticated?"
+  if [ -z "$messages" ]; then
+    case "$notice" in
+      *"No messages found"*) messages='[]' ;;
+      *) die "could not read the inbox — is gws authenticated?" ;;
+    esac
+  fi
 
   # The exact unread total for the whole label, not just the page we list, so
   # the badge keeps counting past the bottom of the panel.
@@ -143,6 +171,8 @@ cmd_list() {
 
   email="$(account_email)" || email=""
 
+  ensure_json_object "$CACHE_FILE"
+  ensure_json_object "$LABEL_FILE"
   fill_cache "$messages"
   fill_labels "$messages"
   render "$messages" "$unread" "$email"
@@ -154,7 +184,6 @@ cmd_list() {
 # only refetched when that happens, and costs nothing the rest of the time.
 fill_labels() {
   local messages="$1" unknown fetched
-  [ -r "$LABEL_FILE" ] || printf '{}\n' > "$LABEL_FILE"
 
   unknown="$(jq -r --slurpfile map "$LABEL_FILE" '
       [ .[] | (.labels // [])[] | select(startswith("Label_")) ]
@@ -176,7 +205,6 @@ fill_labels() {
 # unchanged inbox costs nothing.
 fill_cache() {
   local messages="$1" missing tmp id
-  [ -r "$CACHE_FILE" ] || printf '{}\n' > "$CACHE_FILE"
 
   missing="$(jq -r --slurpfile cache "$CACHE_FILE" '
       [.[] | .id | select(. != null)]
