@@ -93,21 +93,26 @@ Panel {
     return /^[0-9a-f]{1,32}$/.test(String(id))
   }
 
-  // The address comes back from the API too, and it picks which account the
-  // browser opens. Anything not shaped like an address falls back to /u/0/,
-  // which is the signed-in default rather than a guess.
-  function accountSegment() {
-    if (/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(root.email))
-      return encodeURIComponent(root.email)
-    return "0"
+  // Which account the browser opens. `/mail/u/<address>/` is not a path Gmail
+  // has — it 404s, encoded or not; only `/mail/u/<index>/` exists. The address
+  // goes in `authuser`, which is a query and therefore belongs before the
+  // fragment. Anything not shaped like an address is left off entirely, so the
+  // link falls back to whichever account the browser is already signed in to.
+  function accountQuery() {
+    if (/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(root.email))
+      return "?authuser=" + encodeURIComponent(root.email)
+    return ""
   }
 
-  function messageUrl(id) {
-    return "https://mail.google.com/mail/u/" + accountSegment() + "/#inbox/" + id
+  // Gmail addresses a conversation by its thread, which is what its own URLs
+  // carry. For a single-message thread the two ids are the same; for a reply
+  // chain only the thread id resolves.
+  function messageUrl(threadId) {
+    return "https://mail.google.com/mail/u/0/" + accountQuery() + "#inbox/" + threadId
   }
 
   function inboxUrl() {
-    return "https://mail.google.com/mail/u/" + accountSegment() + "/#inbox"
+    return "https://mail.google.com/mail/u/0/" + accountQuery() + "#inbox"
   }
 
   // The list is a plain JS array, so a row is updated by handing over a new
@@ -133,11 +138,12 @@ Panel {
     if (unread > 0) unread -= 1
   }
 
-  function openMessage(id) {
-    if (!validId(id)) return
-    // An array, never one string for a shell to split: the id is external.
-    Quickshell.execDetached(["xdg-open", root.messageUrl(id)])
-    markRead(id)
+  function openMessage(message) {
+    if (!message || !validId(message.id)) return
+    var thread = validId(message.threadId) ? message.threadId : message.id
+    // An array, never one string for a shell to split: the ids are external.
+    Quickshell.execDetached(["xdg-open", root.messageUrl(thread)])
+    markRead(message.id)
     close()
   }
 
@@ -172,7 +178,7 @@ Panel {
 
   function activateCursor() {
     if (cursor < 0 || cursor >= messages.length) return
-    openMessage(messages[cursor].id)
+    openMessage(messages[cursor])
   }
 
   // "2m", "4h", "3d" — a mail's age is a glance, not a timestamp. Anything
@@ -457,7 +463,7 @@ Panel {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onContainsMouseChanged: if (containsMouse) root.cursor = row.index
-              onClicked: root.openMessage(row.modelData.id)
+              onClicked: root.openMessage(row.modelData)
             }
 
             Row {
