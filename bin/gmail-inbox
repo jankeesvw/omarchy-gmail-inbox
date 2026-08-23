@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# gmail-inbox — data source for the Omarchy Gmail bar widget.
+#
+# Everything goes through the Google Workspace CLI (`gws`), which owns the
+# OAuth token; no credential of any kind passes through this script or its
+# argument list.
+#
+#   gmail-inbox list             {"ok":true,"email":"...","unread":9,"messages":[...]}
+#   gmail-inbox read <id>        mark one message as read
+#   gmail-inbox read-all         mark every unread message in the inbox as read
+#   gmail-inbox demo <on|off>    fixed English inbox for screenshots; every
+#                                write turns into a no-op while it is on, so a
+#                                demo can never touch a real mailbox
+#
+# `list` costs two API calls on a warm cache. The subject, sender and
+# read state come from one `+triage` call, so the unread dots are never
+# stale. The snippet and the timestamp never change once a message exists,
+# so those are cached per message id and only fetched for ids we have not
+# seen before.
+#
+# Output is always a single JSON object. Failures print {"ok":false,...}
+# and exit 0: a widget that gets no JSON has nothing to show but a crash.
+
+set -uo pipefail
+umask 077
+
+# gws refuses to decrypt its token when it cannot reach the OS keyring, which
+# is exactly the situation a Quickshell child process is in.
+export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="${GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND:-file}"
+
+# The shell is started by uwsm and does not necessarily inherit the login
+# shell's PATH, so a version-manager shim directory is worth adding back.
+for candidate in "$HOME/.local/share/mise/shims" "$HOME/.local/bin" "$HOME/.bun/bin"; do
+  case ":$PATH:" in
+    *":$candidate:"*) ;;
+    *) [ -d "$candidate" ] && PATH="$PATH:$candidate" ;;
+  esac
+done
+export PATH
+
+QUERY="${OMARCHY_GMAIL_QUERY:-in:inbox}"
+LABEL="${OMARCHY_GMAIL_LABEL:-INBOX}"
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gmail-inbox"
+CACHE_FILE="$CACHE_DIR/messages.json"
+PROFILE_FILE="$CACHE_DIR/profile.json"
+DEMO_FILE="$CACHE_DIR/demo"
+
+die() {
+  printf '{"ok":false,"error":%s}\n' "$(printf '%s' "$1" | jq -Rs .)"
+  exit 0
+}
+
+# How many messages the panel lists. Clamped rather than trusted: this comes
+# from the environment, and it ends up in an API request and in a loop bound.
+max_messages() {
+  local value="${OMARCHY_GMAIL_MAX:-20}"
+  case "$value" in
+    ''|*[!0-9]*) printf '20'; return 0 ;;
+  esac
+  [ "${#value}" -le 3 ] || { printf '20'; return 0; }
+  local n=$((10#$value))
+  [ "$n" -ge 1 ] || { printf '20'; return 0; }
+  [ "$n" -le 50 ] || { printf '50'; return 0; }
+  printf '%s' "$n"
+}
+
+# Message ids come back from the API, so they are input. They end up in a URL
+# the browser opens and in an API request, and a value shaped like anything
+# else is a sign the other side is not what we think it is — so refuse it
+# rather than try to clean it up.
+valid_id() {
+  [[ "$1" =~ ^[0-9a-f]{1,32}$ ]]
+}
+
+# mkdir -p follows a symlink to a directory and reports success, and leaves
+# the mode of a directory that was already there alone. Check the path itself
+# afterwards, and repair what an older version may have left world-readable.
+private_dir() {
+  local dir="$1" owner mode
+  mkdir -p -m 700 -- "$dir" 2>/dev/null
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || return 1
+  [[ "$owner" == "$(id -u)" ]] || return 1
+  mode="$(stat -c '%a' -- "$dir" 2>/dev/null)"
+  if [[ "$mode" != "700" ]]; then
+    chmod 700 -- "$dir" 2>/dev/null || return 1
+    find "$dir" -maxdepth 1 -type f -exec chmod 600 -- {} + 2>/dev/null
+  fi
+}
+
+command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
+
+private_dir "$CACHE_DIR" || die "cache directory is not usable"
+
+demo_on() { [ -e "$DEMO_FILE" ]; }
+
+demo_on || command -v gws >/dev/null 2>&1 || die "gws not found on PATH — see the README"
+
+gws_gmail() {
+  gws gmail "$@" 2>/dev/null
+}
+
+# ------------------------------------------------------------------ profile
+#
+# Only needed for the /mail/u/<address>/ part of the message URL, so that the
+# right account opens on a browser signed in to several. It never changes;
+# fetch it once and keep it.
+account_email() {
+  local cached email
+  if [ -r "$PROFILE_FILE" ]; then
+    cached="$(jq -r '.emailAddress // empty' "$PROFILE_FILE" 2>/dev/null)"
+    [ -n "$cached" ] && { printf '%s' "$cached"; return 0; }
+  fi
+  email="$(gws_gmail users getProfile --params '{"userId":"me"}' \
+    | jq -r '.emailAddress // empty' 2>/dev/null)"
+  [ -n "$email" ] || return 1
+  printf '{"emailAddress":%s}\n' "$(printf '%s' "$email" | jq -Rs .)" > "$PROFILE_FILE"
+  printf '%s' "$email"
+}
+
+# ------------------------------------------------------------------- list
+
+cmd_list() {
+  local max triage messages unread email
+  max="$(max_messages)"
+
+  triage="$(gws_gmail +triage --query "$QUERY" --max "$max" --labels --format json)"
+  messages="$(printf '%s' "$triage" | jq -c '[.messages[]?]' 2>/dev/null)"
+  [ -n "$messages" ] || die "could not read the inbox — is gws authenticated?"
+
+  # The exact unread total for the whole label, not just the page we list, so
+  # the badge keeps counting past the bottom of the panel.
+  unread="$(gws_gmail users labels get --params "$(jq -nc --arg id "$LABEL" '{userId:"me",id:$id}')" \
+    | jq -r '.messagesUnread // empty' 2>/dev/null)"
+  case "$unread" in ''|*[!0-9]*) unread=0 ;; esac
+
+  email="$(account_email)" || email=""
+
+  fill_cache "$messages"
+  render "$messages" "$unread" "$email"
+}
+
+# Fetch snippet and timestamp for every id we have never seen. Both are fixed
+# for the life of a message, so this runs once per message and a refresh of an
+# unchanged inbox costs nothing.
+fill_cache() {
+  local messages="$1" missing tmp id
+  [ -r "$CACHE_FILE" ] || printf '{}\n' > "$CACHE_FILE"
+
+  missing="$(jq -r --slurpfile cache "$CACHE_FILE" '
+      [.[] | .id | select(. != null)]
+      | map(select($cache[0][.] == null))
+      | .[]
+    ' <<<"$messages" 2>/dev/null)"
+  [ -n "$missing" ] || return 0
+
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-gmail-inbox.XXXXXX")" || return 0
+
+  # The id reaches the worker as an argument, never spliced into its source by
+  # xargs. It is already filtered to hex above, but a value from the API has no
+  # business being substituted into a shell script either way.
+  while IFS= read -r id; do
+    valid_id "$id" || continue
+    printf '%s\n' "$id"
+  done <<<"$missing" | xargs -r -P 6 -I {} bash -c '
+      id="$1"
+      out="$2"
+      params=$(jq -nc --arg id "$id" \
+        "{userId:\"me\",id:\$id,format:\"metadata\",metadataHeaders:[\"Subject\"]}")
+      gws gmail users messages get --params "$params" 2>/dev/null \
+        | jq -c "{(.id): {snippet: (.snippet // \"\"), ts: ((.internalDate // \"0\") | tonumber? // 0), threadId: (.threadId // .id)}}" \
+        > "$out/$id.json" 2>/dev/null
+    ' _ {} "$tmp"
+
+  # Merge in one go and keep the file bounded: an inbox churns, and a cache
+  # that only ever grows is a log of everything that passed through it.
+  local merged
+  merged="$(jq -s '
+      (.[0] // {}) as $old
+      | reduce .[1:][] as $entry ($old; . + $entry)
+      | to_entries
+      | sort_by(-(.value.ts // 0))
+      | .[0:500]
+      | from_entries
+    ' "$CACHE_FILE" "$tmp"/*.json 2>/dev/null)"
+  [ -n "$merged" ] && printf '%s\n' "$merged" > "$CACHE_FILE"
+
+  rm -rf -- "$tmp"
+}
+
+# Everything the panel draws, shaped here rather than in QML: the widget
+# should render a list, not parse mail headers.
+render() {
+  local messages="$1" unread="$2" email="$3"
+  jq -nc \
+    --argjson messages "$messages" \
+    --slurpfile cache "$CACHE_FILE" \
+    --argjson unread "$unread" \
+    --arg email "$email" '
+    def entity:
+      gsub("&lt;";"<") | gsub("&gt;";">") | gsub("&quot;";"\"")
+      | gsub("&#39;";"'"'"'") | gsub("&nbsp;";" ") | gsub("&amp;";"&");
+
+    # "Denise <denise@example.com>" reads as a person; the address alone does
+    # not. Fall back to the address when there is no display name.
+    def sender:
+      . as $raw
+      | (capture("^\\s*\"?(?<name>[^\"<]*?)\"?\\s*<(?<addr>[^>]+)>\\s*$") // null) as $m
+      | if $m == null then ($raw | ltrimstr(" ") | rtrimstr(" "))
+        elif ($m.name | length) > 0 then $m.name
+        else $m.addr end;
+
+    ($cache[0] // {}) as $c
+    | {
+        ok: true,
+        email: $email,
+        unread: $unread,
+        messages: [
+          $messages[]
+          | select(.id != null)
+          | . as $m
+          | ($c[$m.id] // {}) as $extra
+          | {
+              id: $m.id,
+              threadId: ($extra.threadId // $m.id),
+              subject: ((($m.subject // "") | entity) as $s
+                        | if ($s | length) > 0 then $s else "(no subject)" end),
+              from: (($m.from // "") | entity | sender),
+              snippet: (($extra.snippet // "") | entity),
+              ts: (($extra.ts // 0) / 1000 | floor),
+              unread: (($m.labels // []) | index("UNREAD") != null)
+            }
+        ]
+        | sort_by(-.ts)
+      }'
+}
+
+# ------------------------------------------------------------------ writes
+
+cmd_read() {
+  local id="${1:-}"
+  valid_id "$id" || die "not a message id"
+  gws_gmail users messages modify \
+    --params "$(jq -nc --arg id "$id" '{userId:"me",id:$id}')" \
+    --json '{"removeLabelIds":["UNREAD"]}' >/dev/null || die "could not mark as read"
+  printf '{"ok":true}\n'
+}
+
+cmd_read_all() {
+  local ids body count
+  # Everything unread in the label, not only what the panel happens to list —
+  # "mark all as read" that leaves some behind is worse than no button.
+  ids="$(gws_gmail users messages list \
+      --params "$(jq -nc --arg q "is:unread $QUERY" '{userId:"me",q:$q,maxResults:500}')" \
+    | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
+  [ -n "$ids" ] || die "could not list unread messages"
+
+  # `[ x -eq y ]` evaluates its operands as arithmetic, so the count is compared
+  # as a string against the one value that matters instead.
+  count="$(jq 'length' <<<"$ids")"
+  case "$count" in
+    ''|*[!0-9]*) die "could not count unread messages" ;;
+    0) printf '{"ok":true,"marked":0}\n'; return 0 ;;
+  esac
+
+  body="$(jq -nc --argjson ids "$ids" '{ids:$ids,removeLabelIds:["UNREAD"]}')"
+  gws_gmail users messages batchModify --params '{"userId":"me"}' --json "$body" >/dev/null \
+    || die "could not mark all as read"
+  printf '{"ok":true,"marked":%s}\n' "$count"
+}
+
+# -------------------------------------------------------------------- demo
+#
+# A fixed inbox for screenshots and for trying the panel out without an
+# account. Ages are relative to now, so the "4m / 2h / 1d" column stays honest
+# however long the demo has been switched on.
+cmd_demo() {
+  case "${1:-}" in
+    on)  : > "$DEMO_FILE"; printf '{"ok":true,"demo":true}\n' ;;
+    off) rm -f -- "$DEMO_FILE"; printf '{"ok":true,"demo":false}\n' ;;
+    *)   die "demo takes on or off" ;;
+  esac
+}
+
+demo_list() {
+  jq -nc --argjson now "$(date +%s)" '
+    def m($id; $mins; $from; $subject; $snippet; $unread):
+      { id: $id, threadId: $id, subject: $subject, from: $from,
+        snippet: $snippet, ts: ($now - ($mins * 60)), unread: $unread };
+    {
+      ok: true,
+      email: "you@example.com",
+      messages: [
+        m("d000000000000a01"; 4;    "Priya Raghunathan"; "Re: Friday demo — moved to 3pm";
+          "Works for me. I moved the room booking too, so we have the big screen this time."; true),
+        m("d000000000000a02"; 38;   "Tom Bakker";        "Invoice 2026-0841 is overdue";
+          "Hi, our records show invoice 2026-0841 has not been paid yet. Could you check whether"; true),
+        m("d000000000000a03"; 95;   "GitHub";            "[omarchy-gmail-inbox] Pull request opened";
+          "sam-dev wants to merge 3 commits into main from fix/badge-width. Files changed: 2"; true),
+        m("d000000000000a04"; 180;  "Anna Kowalski";     "Notes from the architecture review";
+          "Attached are the notes. The main open question is whether we keep the cache in front"; true),
+        m("d000000000000a05"; 420;  "Fly.io";            "Deployment finished for wandering-fog-4821";
+          "Your app was deployed successfully. 2 machines updated in ams. View the release at"; false),
+        m("d000000000000a06"; 1300; "Marc Delacroix";    "Lunch next week?";
+          "I am in town Tuesday through Thursday. Any of those work for you? Happy to come by"; true),
+        m("d000000000000a07"; 2600; "Stripe";            "Your payout of €1,284.00 is on the way";
+          "This payout should arrive in your bank account on Monday. It covers 41 payments made"; false),
+        m("d000000000000a08"; 4400; "Linear";            "3 issues assigned to you this week";
+          "ENG-412 Panel drops keyboard focus, ENG-418 Snippet cache grows without bound, ENG-"; false)
+      ]
+    }
+    | .unread = ([.messages[] | select(.unread)] | length)'
+}
+
+case "${1:-list}" in
+  list)     if demo_on; then demo_list; else cmd_list; fi ;;
+  read)     if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}"; fi ;;
+  read-all) if demo_on; then printf '{"ok":true,"marked":0}\n'; else cmd_read_all; fi ;;
+  demo)     cmd_demo "${2:-}" ;;
+  *)        die "unknown command" ;;
+esac

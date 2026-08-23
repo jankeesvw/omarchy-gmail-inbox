@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "jankeesvw.gmail-inbox",
+  "name": "Gmail Inbox",
+  "version": "1.0.0",
+  "author": "Jankees",
+  "description": "Unread count in the bar, with the inbox in a panel",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Gmail Inbox",
+    "description": "Unread count in the bar, with the inbox in a panel",
+    "category": "Apps",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
