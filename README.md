@@ -57,6 +57,28 @@ Optionally bind the panel to a key, in `~/.config/omarchy/hypr/bindings.lua`:
 o.bind("SUPER + M", "Gmail", "omarchy-shell shell toggle jankeesvw.gmail-inbox")
 ```
 
+## Removing it
+
+```bash
+omarchy plugin remove jankeesvw.gmail-inbox
+```
+
+That leaves two things on disk on purpose, so removing the plugin by accident
+costs you nothing:
+
+- `~/.config/omarchy-gmail-inbox/config`, if you made one.
+- `~/.cache/omarchy-gmail-inbox/`, which holds the subject, sender, first line
+  and label ids of every message the panel has listed, plus the address of the
+  account. That is mailbox content, so delete it if the machine is changing
+  hands:
+
+```bash
+rm -rf ~/.cache/omarchy-gmail-inbox ~/.config/omarchy-gmail-inbox
+```
+
+Signing `gws` out is separate, and worth doing on a machine you are handing
+over: `gws auth logout`.
+
 ## Using it
 
 | | |
