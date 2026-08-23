@@ -25,23 +25,36 @@ body, and how long it has been there.
 
 ## Requirements
 
-This widget assumes you already have the [Google Workspace CLI][gws]
-installed and authenticated - it owns the OAuth token, and no credential ever
-passes through this plugin. `jq` is used for the JSON handling.
+This widget assumes you already have the [Google Workspace CLI][gws] installed
+and authenticated. It owns the OAuth token, and no credential ever passes
+through this plugin. `jq` is used for the JSON handling.
 
-If you do not have it yet:
+If you do not have it yet, its own README has the current instructions. The
+short version is a pre-built binary from the [releases page][releases], or:
 
 ```bash
-npm install -g @googleworkspace/cli
-gws auth login -s gmail          # opens a browser; needs an interactive terminal
+npm install -g @googleworkspace/cli   # needs Node 18 or newer
 ```
 
-The login needs the `gmail.modify` scope, which is what `-s gmail` grants:
-reading the inbox is not enough, marking a message as read is a write.
+Then, once:
 
-Check it with `gws auth status` - `"token_valid": true` means you are set.
+```bash
+gws auth setup              # sets up the Google Cloud project it needs
+gws auth login -s gmail     # opens a browser; needs an interactive terminal
+```
+
+That first step is not optional: `gws` authenticates against a Cloud project of
+your own rather than a shared client, and `auth setup` is what creates it. It
+drives `gcloud` to do so, and the CLI's README covers setting the project up by
+hand in the Cloud Console if you would rather not install that. The
+login needs the `gmail.modify` scope, which the `gmail` service covers. Reading
+the inbox is not enough on its own, because marking a message as read is a
+write.
+
+Check it with `gws auth status`, where `"token_valid": true` means you are set.
 
 [gws]: https://github.com/googleworkspace/cli
+[releases]: https://github.com/googleworkspace/cli/releases
 
 ## Install
 
