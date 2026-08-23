@@ -385,8 +385,9 @@ demo_plain() {
     | .unread = ([.messages[] | select(.unread)] | length)'
 }
 
-# The one for posting. Everything in here is a joke about the machine this
-# runs on; nothing in it is anybody's actual mail.
+# The one for posting. These are real GitHub notifications from public
+# open-source repositories, trimmed to fit: nothing here is private mail, and
+# nothing here is invented.
 demo_fun() {
   jq -nc --argjson now "$(date +%s)" '
     def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $labels):
@@ -397,36 +398,42 @@ demo_fun() {
       ok: true,
       email: "you@example.com",
       messages: [
-        m("d000000000000b01"; 2;    "X";                 "DHH quoted your post. Again.";
-          "Three in one week now. Your notifications tab has stopped loading entirely.";
-          true; true; ["x"]),
-        m("d000000000000b02"; 18;   "X";                 "412 new followers while you slept";
-          "Turns out shipping one plugin a day is a growth strategy. Do not tell marketing.";
-          true; false; ["x"]),
-        m("d000000000000b03"; 47;   "Arch Linux";        "1,204 packages can be upgraded";
-          "You ran pacman -Syu eleven minutes ago. We admire the commitment, truly.";
-          true; false; ["arch"]),
-        m("d000000000000b04"; 125;  "Omasnap";           "Feature request: make the ruler lie";
-          "Our designer insists 4px is basically 8px and would like the readout to agree.";
-          true; false; ["omasnap"]),
-        m("d000000000000b05"; 190;  "systemd";           "Failed to start something you never configured";
-          "Job failed with result dependency. See journalctl -xeu for 4,000 unhelpful lines.";
+        m("d000000000000b01"; 8;    "Tobias Lütke";
+          "Re: [tobi/omasnap] feat(editor): show the pixel size of the frame you are drawing (PR #72)";
+          "Merged #72 into main.";
+          true; true; ["github"]),
+        m("d000000000000b02"; 35;   "David Heinemeier Hansson";
+          "Re: [basecamp/omarchy] Quattro (PR #6231)";
+          "No. Everything is tightly integrated.";
           true; false; []),
-        m("d000000000000b06"; 380;  "Quickshell";        "Your widget has implicitWidth 0";
-          "It is invisible and unclickable. You will work this out in about two hours.";
-          true; false; ["omarchy"]),
-        m("d000000000000b07"; 560;  "Hyprland";          "Config reloaded. Mostly.";
-          "All 47 keybindings survived. The one you were changing did not. Sorry.";
-          false; false; ["omarchy"]),
-        m("d000000000000b08"; 1500; "Wayland Protocols"; "Re: screen sharing (2019-2026)";
-          "Still no. Attached: 200 pages on why not, and a roadmap that ends in 2031.";
-          false; true; []),
-        m("d000000000000b09"; 1900; "Neovim";            "You have been in insert mode for six hours";
-          "Escape is still in the top left corner. No pressure. Just checking in.";
-          false; false; []),
-        m("d000000000000b10"; 3400; "Omarchy Plugins";   "Plugin 1 of 7 is live";
-          "Six to go this week. The bar has room for two more before it becomes a monitor.";
-          false; false; ["ship-it"])
+        m("d000000000000b03"; 130;  "HANCORE";
+          "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Omasweeper (Issue #1149)";
+          "Manual static review found a stale bar-layout migration and an input race before restore";
+          true; false; ["github"]),
+        m("d000000000000b04"; 260;  "Anthony";
+          "Re: [tobi/omasnap] feat(editor): show the pixel size of the frame (PR #72)";
+          "Thanks for working on this! I opened a similar discussion on the Omarchy repo last week";
+          true; false; []),
+        m("d000000000000b05"; 490;  "Jeff Yang";
+          "Re: [basecamp/omarchy] Quattro (PR #6231)";
+          "Would it be possible to release Quattro as a standalone package for other distributions?";
+          true; false; []),
+        m("d000000000000b06"; 1380; "Geert-Johan Riemer";
+          "[jankeesvw/omarchy-unifi-protect] Restart the watcher once the settings arrive (PR #3)";
+          "The bar assigns a widget its settings from a Qt.callLater, one event-loop turn later";
+          true; false; []),
+        m("d000000000000b07"; 1700; "Copilot";
+          "Re: [basecamp/omarchy] Add a notifications.position setting for centered toasts (PR #7367)";
+          "Copilot was unable to run its full agentic suite in this review.";
+          false; false; ["github"]),
+        m("d000000000000b08"; 2100; "github-actions[bot]";
+          "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Omasweeper (Issue #1149)";
+          "Closed #1149 as completed.";
+          false; false; ["github"]),
+        m("d000000000000b09"; 9800; "David Heinemeier Hansson";
+          "[basecamp/omarchy] Release v4.0.0 - v4.0.0";
+          "Tag: v4.0.0 · Commit: f002044 · Released by: dhh. The Quattro Release.";
+          false; true; [])
       ]
     }
     | .unread = ([.messages[] | select(.unread)] | length)'
