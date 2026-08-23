@@ -68,7 +68,7 @@ o.bind("SUPER + M", "Gmail", "omarchy-shell shell toggle jankeesvw.gmail-inbox")
 | Click its dot | mark it read, or put it back to unread |
 | Click its star | star or unstar it, panel stays open |
 | `↑` `↓` or `j` `k` | move through the list |
-| `Enter` or `o` | open the message under the cursor |
+| `Enter`, `Space` or `o` | open the message under the cursor |
 | `s` | star or unstar it |
 | `Shift`+`I` | mark it read |
 | `Shift`+`U` | mark it unread |
