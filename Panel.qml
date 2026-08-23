@@ -37,10 +37,12 @@ Panel {
 
   readonly property string iconEnvelope: "\uF0E0"
   readonly property string iconDot: "\uF111"
+  readonly property string iconDotOpen: "\uF10C"
   readonly property string iconCheck: "\uF00C"
   readonly property string iconExternal: "\uF08E"
   readonly property string iconStar: "\uF005"
   readonly property string iconStarEmpty: "\uF006"
+  readonly property string iconClip: "\uF0C6"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   // A full inbox is normal, not an alarm, so the badge takes the theme accent
@@ -54,6 +56,7 @@ Panel {
 
   property var messages: []
   property int unread: 0
+  property int total: 0
   property string email: ""
   property bool reachable: true
   property string errorText: ""
@@ -97,6 +100,15 @@ Panel {
   // side is not what we think it is — refuse it instead of tidying it up.
   function validId(id) {
     return /^[0-9a-f]{1,32}$/.test(String(id))
+  }
+
+  // "Inbox of you@example.com (10 emails, 6 unread)". Both counts describe the
+  // whole label rather than the slice on screen, which is the same thing the
+  // badge counts — the panel lists at most OMARCHY_GMAIL_MAX of them.
+  function titleText() {
+    var counts = root.total + (root.total === 1 ? " email" : " emails")
+               + ", " + root.unread + " unread"
+    return (root.email !== "" ? "Inbox of " + root.email : "Inbox") + " (" + counts + ")"
   }
 
   // Which account the browser opens. `/mail/u/<address>/` is not a path Gmail
@@ -143,12 +155,13 @@ Panel {
     return changed
   }
 
-  function markLocalRead(id) {
+  function setLocalRead(id, wanted) {
     for (var i = 0; i < messages.length; i++) {
       if (messages[i].id !== id) continue
-      if (!messages[i].unread) return
-      patchMessage(id, { unread: false })
-      if (unread > 0) unread -= 1
+      if (messages[i].unread === !wanted) return
+      patchMessage(id, { unread: !wanted })
+      if (wanted) { if (unread > 0) unread -= 1 }
+      else unread += 1
       return
     }
   }
@@ -167,12 +180,20 @@ Panel {
     close()
   }
 
-  function markRead(id) {
+  function setRead(id, wanted) {
     if (!validId(id) || readProc.running) return
-    root.markLocalRead(id)
+    root.setLocalRead(id, wanted)
     pendingId = id
-    readProc.command = [root.script, "read", id]
+    readProc.command = [root.script, wanted ? "read" : "unread", id]
     readProc.running = true
+  }
+
+  // Opening a message always means read; only the dot toggles both ways.
+  function markRead(id) { setRead(id, true) }
+
+  function toggleRead(message) {
+    if (!message) return
+    setRead(message.id, message.unread === true)
   }
 
   function markAllRead() {
@@ -225,6 +246,7 @@ Panel {
       if (!reachable) return
       messages = data.messages || []
       unread = data.unread || 0
+      total = data.total || 0
       email = data.email || ""
       if (cursor > messages.length - 1) cursor = messages.length - 1
     } catch (e) {
@@ -370,7 +392,7 @@ Panel {
       onTextKey: function(t) {
         var onCursor = root.cursor >= 0 && root.cursor < root.messages.length
         if (t === "r" && onCursor)
-          root.markRead(root.messages[root.cursor].id)
+          root.toggleRead(root.messages[root.cursor])
         else if (t === "s" && onCursor)
           root.toggleStar(root.messages[root.cursor])
         else if (t === "a")
@@ -398,21 +420,11 @@ Panel {
 
             PanelSectionHeader {
               width: parent.width
-              text: root.unread > 0 ? "INBOX  " + root.unread : "INBOX"
-              textFormat: Text.PlainText
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Text {
-              width: parent.width
-              visible: root.email !== ""
-              text: root.email
+              text: root.titleText()
               textFormat: Text.PlainText
               elide: Text.ElideRight
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              color: Qt.darker(root.foreground, 1.6)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
             }
           }
 
@@ -448,6 +460,31 @@ Panel {
         }
 
         PanelSeparator { width: parent.width }
+
+        // A failed refresh keeps the list it already had, because a stale inbox
+        // beats an empty one. But then the only sign that anything is wrong is
+        // a slightly dimmer icon in the bar, and a list that quietly stops
+        // moving reads as a quiet mailbox — so say it here as well. Expired
+        // credentials are the case this exists for.
+        Item {
+          width: parent.width
+          height: root.reachable ? 0 : staleWarning.implicitHeight + Style.space(6)
+          visible: !root.reachable
+
+          Text {
+            id: staleWarning
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width
+            text: root.errorText !== ""
+              ? root.errorText
+              : "Could not reach Gmail. Showing the last list."
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: bar ? bar.urgent : Color.urgent
+          }
+        }
 
         // --------------------------------------------------------- list
 
@@ -519,19 +556,24 @@ Panel {
 
                 Text {
                   anchors.centerIn: parent
-                  visible: row.modelData.unread
-                  text: root.iconDot
+                  text: row.modelData.unread ? root.iconDot : root.iconDotOpen
                   textFormat: Text.PlainText
                   font.family: root.fontFamily
-                  font.pixelSize: Style.space(7)
-                  color: root.accent
+                  // The outline needs the extra pixels: at the size the filled
+                  // dot works, its stroke lands under one pixel and vanishes.
+                  font.pixelSize: row.modelData.unread ? Style.space(7) : Style.space(10)
+                  // Filled and in the accent while unread, an outline once it
+                  // has been read — faint enough to stay a marker rather than
+                  // become a second row of bullets down the list.
+                  color: row.modelData.unread
+                    ? root.accent
+                    : Qt.darker(root.foreground, row.active ? 1.4 : 1.8)
                 }
 
                 MouseArea {
                   anchors.fill: parent
-                  enabled: row.modelData.unread
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.markRead(row.modelData.id)
+                  onClicked: root.toggleRead(row.modelData)
                 }
               }
 
@@ -551,7 +593,7 @@ Panel {
                   Row {
                     id: line
                     anchors.left: parent.left
-                    anchors.right: starSlot.left
+                    anchors.right: clip.left
                     anchors.rightMargin: Style.space(6)
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(5)
@@ -601,6 +643,23 @@ Panel {
                       font.bold: row.modelData.unread
                       color: row.modelData.unread ? root.foreground : Qt.darker(root.foreground, 1.3)
                     }
+                  }
+
+                  // A paperclip earns no reserved slot: unlike the star it is
+                  // never a control, so nothing shifts under the pointer when
+                  // it is absent, and the subject gets the room back.
+                  Text {
+                    id: clip
+                    visible: row.modelData.attachment === true
+                    width: visible ? implicitWidth : 0
+                    anchors.right: starSlot.left
+                    anchors.rightMargin: visible ? Style.space(5) : 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.iconClip
+                    textFormat: Text.PlainText
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    color: Qt.darker(root.foreground, 1.75)
                   }
 
                   // The star keeps its slot whether it is set or not, so the

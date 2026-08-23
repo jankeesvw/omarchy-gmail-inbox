@@ -7,6 +7,7 @@
 #
 #   gmail-inbox list             {"ok":true,"email":"...","unread":9,"messages":[...]}
 #   gmail-inbox read <id>        mark one message as read
+#   gmail-inbox unread <id>      put it back to unread
 #   gmail-inbox read-all         mark every unread message in the inbox as read
 #   gmail-inbox star <id>        add the star
 #   gmail-inbox unstar <id>      take it off
@@ -138,7 +139,7 @@ account_email() {
 # ------------------------------------------------------------------- list
 
 cmd_list() {
-  local max triage notice errfile messages unread email
+  local max triage notice errfile messages counts unread total email
   max="$(max_messages)"
 
   # An empty result is not an error, but +triage reports it as a plain-text
@@ -163,11 +164,14 @@ cmd_list() {
     esac
   fi
 
-  # The exact unread total for the whole label, not just the page we list, so
-  # the badge keeps counting past the bottom of the panel.
-  unread="$(gws_gmail users labels get --params "$(jq -nc --arg id "$LABEL" '{userId:"me",id:$id}')" \
-    | jq -r '.messagesUnread // empty' 2>/dev/null)"
+  # Exact counts for the whole label, not just the page we list, so the badge
+  # and the title keep describing the inbox rather than the visible slice.
+  # Both come out of the one call.
+  counts="$(gws_gmail users labels get --params "$(jq -nc --arg id "$LABEL" '{userId:"me",id:$id}')")"
+  unread="$(printf '%s' "$counts" | jq -r '.messagesUnread // empty' 2>/dev/null)"
+  total="$(printf '%s' "$counts" | jq -r '.messagesTotal // empty' 2>/dev/null)"
   case "$unread" in ''|*[!0-9]*) unread=0 ;; esac
+  case "$total" in ''|*[!0-9]*) total=0 ;; esac
 
   email="$(account_email)" || email=""
 
@@ -175,7 +179,7 @@ cmd_list() {
   ensure_json_object "$LABEL_FILE"
   fill_cache "$messages"
   fill_labels "$messages"
-  render "$messages" "$unread" "$email"
+  render "$messages" "$unread" "$total" "$email"
 }
 
 # Your own labels come back as ids ("Label_8071185..."), never as the names you
@@ -204,7 +208,7 @@ fill_labels() {
 # for the life of a message, so this runs once per message and a refresh of an
 # unchanged inbox costs nothing.
 fill_cache() {
-  local messages="$1" missing tmp id
+  local messages="$1" missing tmp id attach
 
   missing="$(jq -r --slurpfile cache "$CACHE_FILE" '
       [.[] | .id | select(. != null)]
@@ -214,6 +218,17 @@ fill_cache() {
   [ -n "$missing" ] || return 0
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-gmail-inbox.XXXXXX")" || return 0
+
+  # Whether a message carries an attachment is not in the triage output and not
+  # in the metadata format either — only `format:full` has the part list, and
+  # that drags the whole body along. One search settles it for the entire page
+  # instead, and since it never changes for a given message it is cached with
+  # the rest and only ever asked once.
+  attach="$(gws_gmail users messages list \
+      --params "$(jq -nc --arg q "$QUERY has:attachment" --argjson n "$(max_messages)" \
+                    '{userId:"me",q:$q,maxResults:$n}')" \
+    | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
+  case "$attach" in ''|*[!0-9a-f\[\]\",]*) attach='[]' ;; esac
 
   # The id reaches the worker as an argument, never spliced into its source by
   # xargs. It is already filtered to hex above, but a value from the API has no
@@ -234,9 +249,13 @@ fill_cache() {
   # Merge in one go and keep the file bounded: an inbox churns, and a cache
   # that only ever grows is a log of everything that passed through it.
   local merged
-  merged="$(jq -s '
+  merged="$(jq -s --argjson attach "$attach" '
       (.[0] // {}) as $old
-      | reduce .[1:][] as $entry ($old; . + $entry)
+      | ($attach | map({(.): true}) | add // {}) as $hasattachment
+      | reduce .[1:][] as $entry ($old;
+          . + ($entry | to_entries
+                      | map(.value.att = ($hasattachment[.key] // false))
+                      | from_entries))
       | to_entries
       | sort_by(-(.value.ts // 0))
       | .[0:500]
@@ -250,12 +269,13 @@ fill_cache() {
 # Everything the panel draws, shaped here rather than in QML: the widget
 # should render a list, not parse mail headers.
 render() {
-  local messages="$1" unread="$2" email="$3"
+  local messages="$1" unread="$2" total="$3" email="$4"
   jq -nc \
     --argjson messages "$messages" \
     --slurpfile cache "$CACHE_FILE" \
     --slurpfile labelmap "$LABEL_FILE" \
     --argjson unread "$unread" \
+    --argjson total "$total" \
     --arg email "$email" '
     def entity:
       gsub("&lt;";"<") | gsub("&gt;";">") | gsub("&quot;";"\"")
@@ -281,6 +301,7 @@ render() {
         ok: true,
         email: $email,
         unread: $unread,
+        total: $total,
         messages: [
           $messages[]
           | select(.id != null)
@@ -296,6 +317,7 @@ render() {
               ts: (($extra.ts // 0) / 1000 | floor),
               unread: (($m.labels // []) | index("UNREAD") != null),
               starred: (($m.labels // []) | index("STARRED") != null),
+              attachment: ($extra.att // false),
               labels: (($m.labels // []) | mine)
             }
         ]
@@ -306,11 +328,16 @@ render() {
 # ------------------------------------------------------------------ writes
 
 cmd_read() {
-  local id="${1:-}"
+  local id="${1:-}" action="${2:-read}" body
   valid_id "$id" || die "not a message id"
+  case "$action" in
+    read)   body='{"removeLabelIds":["UNREAD"]}' ;;
+    unread) body='{"addLabelIds":["UNREAD"]}' ;;
+    *)      die "unknown read action" ;;
+  esac
   gws_gmail users messages modify \
     --params "$(jq -nc --arg id "$id" '{userId:"me",id:$id}')" \
-    --json '{"removeLabelIds":["UNREAD"]}' >/dev/null || die "could not mark as read"
+    --json "$body" >/dev/null || die "could not change the read state"
   printf '{"ok":true}\n'
 }
 
@@ -329,26 +356,41 @@ cmd_star() {
 }
 
 cmd_read_all() {
-  local ids body count
+  local page ids token batch body count marked=0 rounds=0
+
   # Everything unread in the label, not only what the panel happens to list —
-  # "mark all as read" that leaves some behind is worse than no button.
-  ids="$(gws_gmail users messages list \
-      --params "$(jq -nc --arg q "is:unread $QUERY" '{userId:"me",q:$q,maxResults:500}')" \
-    | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
-  [ -n "$ids" ] || die "could not list unread messages"
+  # "mark all as read" that leaves some behind is worse than no button. One
+  # request caps at 500 ids and hands back a nextPageToken for the rest, so a
+  # single call silently stops there: on a label with 3383 unread it would
+  # clear 500 and leave 2883 behind, with the badge as the only hint. Walk the
+  # pages instead. The round cap is a runaway guard, not a limit anyone reaches
+  # — 40 pages is 20.000 messages.
+  while [ "$rounds" -lt 40 ]; do
+    rounds=$((rounds + 1))
+    page="$(gws_gmail users messages list --params "$(
+      jq -nc --arg q "is:unread $QUERY" --arg t "${token:-}" \
+        '{userId:"me",q:$q,maxResults:500} + (if $t == "" then {} else {pageToken:$t} end)')")"
+    ids="$(printf '%s' "$page" \
+      | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
+    [ -n "$ids" ] || { [ "$marked" -gt 0 ] && break; die "could not list unread messages"; }
 
-  # `[ x -eq y ]` evaluates its operands as arithmetic, so the count is compared
-  # as a string against the one value that matters instead.
-  count="$(jq 'length' <<<"$ids")"
-  case "$count" in
-    ''|*[!0-9]*) die "could not count unread messages" ;;
-    0) printf '{"ok":true,"marked":0}\n'; return 0 ;;
-  esac
+    count="$(jq 'length' <<<"$ids")"
+    case "$count" in ''|*[!0-9]*) die "could not count unread messages" ;; esac
 
-  body="$(jq -nc --argjson ids "$ids" '{ids:$ids,removeLabelIds:["UNREAD"]}')"
-  gws_gmail users messages batchModify --params '{"userId":"me"}' --json "$body" >/dev/null \
-    || die "could not mark all as read"
-  printf '{"ok":true,"marked":%s}\n' "$count"
+    if [ "$count" != "0" ]; then
+      # batchModify takes at most 1000 ids per call, so a 500-id page always
+      # fits in one.
+      body="$(jq -nc --argjson ids "$ids" '{ids:$ids,removeLabelIds:["UNREAD"]}')"
+      gws_gmail users messages batchModify --params '{"userId":"me"}' --json "$body" >/dev/null \
+        || die "could not mark all as read"
+      marked=$((marked + count))
+    fi
+
+    token="$(printf '%s' "$page" | jq -r '.nextPageToken // empty' 2>/dev/null)"
+    [ -n "$token" ] || break
+  done
+
+  printf '{"ok":true,"marked":%s}\n' "$marked"
 }
 
 # -------------------------------------------------------------------- demo
@@ -410,7 +452,8 @@ demo_plain() {
           false; false; ["team"])
       ]
     }
-    | .unread = ([.messages[] | select(.unread)] | length)'
+    | .unread = ([.messages[] | select(.unread)] | length)
+    | .total = (.messages | length)'
 }
 
 # The one for posting. These are real GitHub notifications from public
@@ -464,12 +507,14 @@ demo_fun() {
           false; true; [])
       ]
     }
-    | .unread = ([.messages[] | select(.unread)] | length)'
+    | .unread = ([.messages[] | select(.unread)] | length)
+    | .total = (.messages | length)'
 }
 
 case "${1:-list}" in
   list)     if demo_on; then demo_list; else cmd_list; fi ;;
-  read)     if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}"; fi ;;
+  read)     if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}" read; fi ;;
+  unread)   if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}" unread; fi ;;
   read-all) if demo_on; then printf '{"ok":true,"marked":0}\n'; else cmd_read_all; fi ;;
   star)     if demo_on; then printf '{"ok":true}\n'; else cmd_star "${2:-}" star; fi ;;
   unstar)   if demo_on; then printf '{"ok":true}\n'; else cmd_star "${2:-}" unstar; fi ;;
