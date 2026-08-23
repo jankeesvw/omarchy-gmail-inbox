@@ -4,21 +4,26 @@ An Omarchy bar widget for your Gmail inbox: the unread count sits in the bar,
 and the panel lists what is waiting — subject, sender, the first line of the
 body, and how long it has been there.
 
-![The panel, listing eight messages](screenshots/panel.png)
+![The panel, listing a page of messages](screenshots/panel.png)
 
-- **Unread count in the bar.** The exact total for the whole inbox, not just
-  what fits in the panel.
-- **A dot per unread message**, which doubles as the button that clears it, so
-  a newsletter can be dismissed without opening it.
+- **Unread count in the bar.** The exact total for the whole label, not just
+  what fits on a page.
+- **A dot per message**, filled while unread and an outline once it has been
+  read. Clicking it works both ways, so a mail can be put back to unread.
 - **Stars**, shown where you set them and settable from the panel. The slot
   stays empty rather than absent, so the ages line up down one column.
+- **A paperclip** on anything carrying an attachment.
 - **Your own labels** as chips in front of the subject, resolved from label id
   to the name you gave it. Gmail's own bookkeeping — `INBOX`, the category
   tabs, `IMPORTANT` — is left out; it says nothing you did not know.
-- **Mark all as read** from the header, covering every unread message in the
-  inbox rather than only the ones on screen.
+- **Paging** through everything the query matches, 25 at a time.
+- **Unread only**, one button, for when the read ones are in the way.
+- **Mark all as read**, covering every unread message in the label rather than
+  only the page on screen.
 - **Click a message** to open it in your browser, signed in to the right
   account. It is marked read at the same time.
+
+![The same panel with the unread filter on](screenshots/unread-filter.png)
 
 ## Requirements
 
@@ -62,60 +67,79 @@ o.bind("SUPER + M", "Gmail", "omarchy-shell shell toggle jankeesvw.gmail-inbox")
 | Right-click the bar icon | open Gmail in the browser |
 | Middle-click the bar icon | refresh now |
 | Click a message | open it in the browser and mark it read |
-| Click its dot | mark it read, panel stays open |
+| Click its dot | mark it read, or put it back to unread |
 | Click its star | star or unstar it, panel stays open |
 | `↑` `↓` or `j` `k` | move through the list |
 | `Enter` or `Space` | open the message under the cursor |
-| `r` | mark that one read |
+| `r` | toggle read/unread on that one |
 | `s` | star or unstar it |
 | `a` | mark everything read |
+| `u` | show only unread, or everything again |
+| `n` / `p` | next page, previous page |
 | `Esc` | close |
 
-The panel refreshes every minute and whenever it is opened.
+The panel refreshes every minute, whether it is open or not, and again
+whenever you open it or change something.
 
 ## Configuration
 
-All optional, set in the environment the shell runs in:
+The shell is started by uwsm with an environment of its own, so exporting a
+variable in your login shell does not reach the widget — not even through
+`systemctl --user set-environment`. Put settings in
+`~/.config/omarchy-gmail-inbox/config` instead:
 
-| Variable | Default | |
-|---|---|---|
-| `OMARCHY_GMAIL_QUERY` | `in:inbox` | any Gmail search query, e.g. `in:inbox category:primary` |
-| `OMARCHY_GMAIL_LABEL` | `INBOX` | the label the bar counts |
-| `OMARCHY_GMAIL_MAX` | `20` | messages listed in the panel (1–50) |
+```ini
+# Anything Gmail search understands.
+query = in:inbox
+
+# The label whose totals the bar counts. A user label needs its id, which
+# `gws gmail users labels list` will tell you.
+label = INBOX
+
+# Messages per page, 1 to 50.
+max = 25
+```
+
+The file is parsed key by key rather than sourced — a config file that gets
+executed is a config file that can run anything. The matching environment
+variables (`OMARCHY_GMAIL_QUERY`, `OMARCHY_GMAIL_LABEL`, `OMARCHY_GMAIL_MAX`)
+still win where they are set, which is handy for a one-off run.
 
 ## How it works
 
-`bin/gmail-inbox` is the whole backend. A refresh costs two API calls: one
-`+triage` call for the subjects, senders and read state, and one label read
-for the exact unread count.
+`bin/gmail-inbox` is the whole backend; the QML only draws what it hands over.
 
-Snippets and timestamps never change once a message exists, so those are
-cached per message id under `$XDG_CACHE_HOME/omarchy-gmail-inbox` (mode 700,
-capped at 500 entries) and only fetched for messages that have not been seen
-before. An inbox that has not changed therefore costs no extra calls at all.
+A page costs four requests: the ids for the page, one search for which of them
+are unread, one for which are starred, and one label read for the totals. The
+two searches keep the dots honest without a request per message, so the cost
+does not grow with the page size.
 
-Labels arrive as ids (`Label_8071185…`), never as names, so the script keeps a
-second table beside it. A label you have just created announces itself by
-turning up as an id the table cannot resolve, which is the only thing that
-triggers a refetch — so renaming or adding a label fixes itself, and the
-lookup costs nothing the rest of the time.
+Everything that never changes about a message — subject, sender, snippet,
+timestamp, thread, attachment, your labels — is cached per message id under
+`$XDG_CACHE_HOME/omarchy-gmail-inbox` (mode 700, capped at 1000 entries).
+Revisiting a page you have already seen therefore costs nothing extra.
 
-Everything the panel draws is shaped by the script; the QML only renders a
-list. Every `Text` in it is `Text.PlainText`, because subjects and snippets
-are written by whoever sent the mail, and Qt's default would happily render an
+Paging uses Gmail's `nextPageToken`, which only ever points forward, so going
+back means remembering the tokens already used. Mark-all walks those pages
+too: one request caps at 500 ids and hands back a token for the rest, and a
+single call would silently stop there — on a label with 3383 unread it would
+clear 500 and leave 2883 behind with nothing but the badge to hint at it.
+
+Every `Text` in the QML is `Text.PlainText`, because subjects and snippets are
+written by whoever sent the mail, and Qt's default would happily render an
 `<img src="http://...">` in a subject as real rich text — an outbound request
 from your shell process to a server the sender picked.
 
 ## Screenshots without your own mail in them
 
 ```bash
-bin/gmail-inbox demo on     # a plain inbox, for showing what a row is made of
-bin/gmail-inbox demo fun    # real GitHub notifications from public repositories
+bin/gmail-inbox demo on     # real GitHub notifications from public repositories
 bin/gmail-inbox demo off
 ```
 
-Both are fixed lists with no network behind them, and every write turns into a
-no-op while either is on — a demo can never touch a real mailbox.
+A fixed list with no network behind it — long enough to page through — and
+every write turns into a no-op while it is on, so a demo can never touch a
+real mailbox.
 
 ## License
 

@@ -43,6 +43,8 @@ Panel {
   readonly property string iconStar: "\uF005"
   readonly property string iconStarEmpty: "\uF006"
   readonly property string iconClip: "\uF0C6"
+  readonly property string iconPrev: "\uF053"
+  readonly property string iconNext: "\uF054"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   // A full inbox is normal, not an alarm, so the badge takes the theme accent
@@ -64,6 +66,16 @@ Panel {
   property string pendingId: ""
   property bool markingAll: false
   property int cursor: -1
+
+  // Paging. Gmail's tokens only point forward, so going back means keeping
+  // the ones already used: the stack is the history, `pageToken` is where we
+  // are, and `nextPage` is what the last response offered.
+  property string pageToken: ""
+  property var pageStack: []
+  property string nextPage: ""
+  property bool unreadOnly: false
+  readonly property bool hasPrev: pageStack.length > 0
+  readonly property bool hasNext: nextPage !== ""
 
   // Ages are drawn from this rather than from a fresh clock per row, so the
   // whole list ticks over together and only once a minute.
@@ -92,7 +104,46 @@ Panel {
   implicitHeight: bar && bar.vertical ? barSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal)
 
   function refresh() {
-    if (!listProc.running) listProc.running = true
+    if (listProc.running) return
+    var argv = [root.script, "list"]
+    if (unreadOnly) argv.push("--unread")
+    if (pageToken !== "") argv.push("--page", pageToken)
+    listProc.command = argv
+    listProc.running = true
+  }
+
+  function goNextPage() {
+    if (!hasNext || listProc.running) return
+    var stack = pageStack.slice()
+    stack.push(pageToken)
+    pageStack = stack
+    pageToken = nextPage
+    cursor = -1
+    refresh()
+  }
+
+  function goPrevPage() {
+    if (!hasPrev || listProc.running) return
+    var stack = pageStack.slice()
+    pageToken = stack.pop()
+    pageStack = stack
+    cursor = -1
+    refresh()
+  }
+
+  function firstPage() {
+    pageToken = ""
+    pageStack = []
+    cursor = -1
+  }
+
+  // Switching the filter changes what the pages are, so the old tokens point
+  // into a list that no longer exists. Start over rather than carry them.
+  function toggleUnreadOnly() {
+    if (listProc.running) return
+    unreadOnly = !unreadOnly
+    firstPage()
+    refresh()
   }
 
   // Message ids come from the API, so they are input, and this one ends up in
@@ -102,13 +153,13 @@ Panel {
     return /^[0-9a-f]{1,32}$/.test(String(id))
   }
 
-  // "Inbox of you@example.com (10 emails, 6 unread)". Both counts describe the
-  // whole label rather than the slice on screen, which is the same thing the
-  // badge counts — the panel lists at most OMARCHY_GMAIL_MAX of them.
+  // "Inbox (10 emails, 6 unread)", with the address on the line underneath.
+  // Both counts describe the whole label rather than the slice on screen,
+  // which is the same thing the badge counts — the panel lists at most
+  // OMARCHY_GMAIL_MAX of them.
   function titleText() {
-    var counts = root.total + (root.total === 1 ? " email" : " emails")
-               + ", " + root.unread + " unread"
-    return (root.email !== "" ? "Inbox of " + root.email : "Inbox") + " (" + counts + ")"
+    return "Inbox (" + root.total + (root.total === 1 ? " email" : " emails")
+         + ", " + root.unread + " unread)"
   }
 
   // Which account the browser opens. `/mail/u/<address>/` is not a path Gmail
@@ -248,6 +299,7 @@ Panel {
       unread = data.unread || 0
       total = data.total || 0
       email = data.email || ""
+      nextPage = data.nextPage || ""
       if (cursor > messages.length - 1) cursor = messages.length - 1
     } catch (e) {
       reachable = false
@@ -261,6 +313,9 @@ Panel {
       refresh()
     } else {
       cursor = -1
+      // A panel reopened on page 7 of a mailbox is disorienting; the top of
+      // the list is where anyone expects to land.
+      firstPage()
     }
   }
 
@@ -268,7 +323,6 @@ Panel {
 
   Process {
     id: listProc
-    command: [root.script, "list"]
     stdout: StdioCollector {
       onStreamFinished: root.applyPayload(text)
     }
@@ -379,7 +433,11 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(620))
+    // No fixed ceiling: a page of 25 rows is taller than any number picked
+    // here would be, and a card that stops at 620 while the list inside it
+    // keeps going draws rows onto the desktop below. fittedContentHeight
+    // already clamps to what the screen has left, which is the real limit.
+    contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -397,6 +455,12 @@ Panel {
           root.toggleStar(root.messages[root.cursor])
         else if (t === "a")
           root.markAllRead()
+        else if (t === "u")
+          root.toggleUnreadOnly()
+        else if (t === "n")
+          root.goNextPage()
+        else if (t === "p")
+          root.goPrevPage()
       }
 
       Column {
@@ -426,6 +490,17 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
+
+            Text {
+              width: parent.width
+              visible: root.email !== ""
+              text: root.email
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.foreground, 1.6)
+            }
           }
 
           Row {
@@ -433,6 +508,19 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
+
+            // Filter first: it changes what the other two act on.
+            PanelActionButton {
+              // Same language as the rows: filled means unread, an outline
+              // means everything is on show.
+              iconText: root.unreadOnly ? root.iconDot : root.iconDotOpen
+              tooltipText: root.unreadOnly ? "Showing unread only" : "Show unread only"
+              foreground: root.unreadOnly ? root.accent : root.foreground
+              hoverColor: root.accent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.iconSmall
+              onClicked: root.toggleUnreadOnly()
+            }
 
             PanelActionButton {
               id: allReadButton
@@ -502,8 +590,13 @@ Panel {
 
           // Grows with what it holds and stops at whatever the card has left
           // once the header and the footer have had their share.
+          // Everything that is not the list needs its share of the card first.
+          // Leave the pager out of this and a full page of mail pushes it off
+          // the bottom, which is exactly where the buttons are not.
           readonly property int cap: {
             var chrome = Style.space(70)
+            if (root.hasPrev || root.hasNext) chrome += Style.space(38)
+            if (!root.reachable) chrome += Style.space(24)
             return Math.max(Style.space(200),
                             panel.availableCardHeight - panel.verticalContentInset - chrome)
           }
@@ -746,6 +839,56 @@ Panel {
           }
         }
 
+        // ------------------------------------------------------- paging
+
+        // Only there when there is somewhere to go. Gmail hands out one token
+        // at a time and only forwards, so "how many pages" is a question the
+        // API cannot answer — hence a position rather than a count.
+        Item {
+          width: parent.width
+          height: (root.hasPrev || root.hasNext) ? pagerRow.implicitHeight + Style.space(8) : 0
+          visible: root.hasPrev || root.hasNext
+
+          Row {
+            id: pagerRow
+            anchors.centerIn: parent
+            spacing: Style.space(10)
+
+            PanelActionButton {
+              iconText: root.iconPrev
+              tooltipText: "Previous page"
+              enabled: root.hasPrev
+              opacity: enabled ? 1 : 0.3
+              foreground: root.foreground
+              hoverColor: root.accent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.iconSmall
+              onClicked: root.goPrevPage()
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "page " + (root.pageStack.length + 1)
+              textFormat: Text.PlainText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: Qt.darker(root.foreground, 1.7)
+            }
+
+            PanelActionButton {
+              iconText: root.iconNext
+              tooltipText: "Next page"
+              enabled: root.hasNext
+              opacity: enabled ? 1 : 0.3
+              foreground: root.foreground
+              hoverColor: root.accent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.iconSmall
+              onClicked: root.goNextPage()
+            }
+          }
+        }
+
         // -------------------------------------------------- empty states
 
         Item {
@@ -759,7 +902,7 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             text: root.reachable
-              ? "Inbox zero."
+              ? (root.unreadOnly ? "Nothing unread." : "Inbox zero.")
               : (root.errorText !== "" ? root.errorText : "Gmail unreachable")
             textFormat: Text.PlainText
             font.family: root.fontFamily

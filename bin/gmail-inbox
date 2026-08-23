@@ -11,9 +11,7 @@
 #   gmail-inbox read-all         mark every unread message in the inbox as read
 #   gmail-inbox star <id>        add the star
 #   gmail-inbox unstar <id>      take it off
-#   gmail-inbox demo on          a plain fixed inbox, for screenshots
-#   gmail-inbox demo fun         the same but written to be posted
-#   gmail-inbox demo off
+#   gmail-inbox demo on|off      a fixed inbox for screenshots
 #
 # Every write turns into a no-op while a demo is on, so a screenshot session
 # can never touch a real mailbox.
@@ -44,8 +42,37 @@ for candidate in "$HOME/.local/share/mise/shims" "$HOME/.local/bin" "$HOME/.bun/
 done
 export PATH
 
-QUERY="${OMARCHY_GMAIL_QUERY:-in:inbox}"
-LABEL="${OMARCHY_GMAIL_LABEL:-INBOX}"
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-gmail-inbox/config"
+
+# The shell is started by uwsm with an environment of its own, so exporting a
+# variable in your login shell — or even `systemctl --user set-environment` —
+# does not reach the widget. A config file does. Parsed key by key rather than
+# sourced: a file that gets executed is a file that can run anything.
+read_config() {
+  local line key value
+  [ -r "$CONFIG_FILE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$key" in
+      query) CFG_QUERY="$value" ;;
+      label) CFG_LABEL="$value" ;;
+      max)   CFG_MAX="$value" ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+
+CFG_QUERY=""; CFG_LABEL=""; CFG_MAX=""
+read_config
+
+# The environment still wins where it is set, so a one-off run can override
+# the file without editing it.
+QUERY="${OMARCHY_GMAIL_QUERY:-${CFG_QUERY:-in:inbox}}"
+LABEL="${OMARCHY_GMAIL_LABEL:-${CFG_LABEL:-INBOX}}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gmail-inbox"
 CACHE_FILE="$CACHE_DIR/messages.json"
@@ -61,7 +88,7 @@ die() {
 # How many messages the panel lists. Clamped rather than trusted: this comes
 # from the environment, and it ends up in an API request and in a loop bound.
 max_messages() {
-  local value="${OMARCHY_GMAIL_MAX:-20}"
+  local value="${OMARCHY_GMAIL_MAX:-${CFG_MAX:-25}}"
   case "$value" in
     ''|*[!0-9]*) printf '20'; return 0 ;;
   esac
@@ -137,36 +164,48 @@ account_email() {
 }
 
 # ------------------------------------------------------------------- list
+#
+# The panel used to come out of one `+triage` call, which is one request for
+# the whole page. That helper has no pageToken, though, so paging meant moving
+# to messages.list — which returns ids and nothing else. Subject, sender and
+# snippet therefore come from the per-message cache now; none of them ever
+# change, so a page you have seen before still costs nothing.
+#
+# Read state and stars do change, and are read fresh every time as two id
+# searches — one request each, however long the page is.
 
 cmd_list() {
-  local max triage notice errfile messages counts unread total email
-  max="$(max_messages)"
+  local unread_only="" token="" max page ids next counts unread total email
+  local live_unread live_starred eff_query
 
-  # An empty result is not an error, but +triage reports it as a plain-text
-  # line on stderr and still exits 0, leaving stdout empty. Keep that stream
-  # rather than discarding it: without it an empty inbox — the one case where
-  # you most want to believe the widget — reads as an unreachable account.
-  errfile="$(mktemp "${TMPDIR:-/tmp}/omarchy-gmail-inbox-err.XXXXXX")" || errfile=""
-  if [ -n "$errfile" ]; then
-    triage="$(gws gmail +triage --query "$QUERY" --max "$max" --labels --format json 2>"$errfile")"
-    notice="$(cat -- "$errfile" 2>/dev/null)"
-    rm -f -- "$errfile"
-  else
-    triage="$(gws_gmail +triage --query "$QUERY" --max "$max" --labels --format json)"
-    notice=""
-  fi
-
-  messages="$(printf '%s' "$triage" | jq -c '[.messages[]?]' 2>/dev/null)"
-  if [ -z "$messages" ]; then
-    case "$notice" in
-      *"No messages found"*) messages='[]' ;;
-      *) die "could not read the inbox — is gws authenticated?" ;;
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --unread) unread_only=1 ;;
+      --page)   shift; token="${1:-}" ;;
     esac
-  fi
+    shift
+  done
+  # The page token is opaque, comes back from the API and goes straight into
+  # the next request. Keep it to the shape tokens have.
+  case "$token" in *[!A-Za-z0-9_-]*) token="" ;; esac
 
-  # Exact counts for the whole label, not just the page we list, so the badge
-  # and the title keep describing the inbox rather than the visible slice.
-  # Both come out of the one call.
+  max="$(max_messages)"
+  eff_query="$QUERY"
+  [ -n "$unread_only" ] && eff_query="is:unread $QUERY"
+
+  page="$(gws_gmail users messages list --params "$(
+    jq -nc --arg q "$eff_query" --argjson n "$max" --arg t "$token" \
+      '{userId:"me",q:$q,maxResults:$n} + (if $t == "" then {} else {pageToken:$t} end)')")"
+  ids="$(printf '%s' "$page" | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
+  [ -n "$ids" ] || die "could not read the inbox — is gws authenticated?"
+  next="$(printf '%s' "$page" | jq -r '.nextPageToken // empty' 2>/dev/null)"
+  case "$next" in *[!A-Za-z0-9_-]*) next="" ;; esac
+
+  # Which of these are unread, and which are starred. Two searches rather than
+  # a per-message read, so the cost does not grow with the page.
+  live_unread="$(id_set "is:unread $QUERY")"
+  live_starred="$(id_set "is:starred $QUERY")"
+
   counts="$(gws_gmail users labels get --params "$(jq -nc --arg id "$LABEL" '{userId:"me",id:$id}')")"
   unread="$(printf '%s' "$counts" | jq -r '.messagesUnread // empty' 2>/dev/null)"
   total="$(printf '%s' "$counts" | jq -r '.messagesTotal // empty' 2>/dev/null)"
@@ -177,23 +216,37 @@ cmd_list() {
 
   ensure_json_object "$CACHE_FILE"
   ensure_json_object "$LABEL_FILE"
-  fill_cache "$messages"
-  fill_labels "$messages"
-  render "$messages" "$unread" "$total" "$email"
+  fill_cache "$ids"
+  fill_labels_from_cache "$ids"
+  render "$ids" "$live_unread" "$live_starred" "$unread" "$total" "$email" \
+         "$next" "$token" "$unread_only"
+}
+
+# Every id matching a query, as a JSON array. Capped at one page: past 500 the
+# answer is only used to decide which dots to fill, and a mailbox with that
+# many unread has bigger problems than a dot.
+id_set() {
+  local out
+  out="$(gws_gmail users messages list \
+      --params "$(jq -nc --arg q "$1" '{userId:"me",q:$q,maxResults:500}')" \
+    | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
+  [ -n "$out" ] || out='[]'
+  printf '%s' "$out"
 }
 
 # Your own labels come back as ids ("Label_8071185..."), never as the names you
 # gave them, so they need a lookup table. Names change rarely, and a new one
 # announces itself by turning up as an id we cannot resolve — so the table is
 # only refetched when that happens, and costs nothing the rest of the time.
-fill_labels() {
-  local messages="$1" unknown fetched
+fill_labels_from_cache() {
+  local ids unknown fetched
+  ids="$1"
 
-  unknown="$(jq -r --slurpfile map "$LABEL_FILE" '
-      [ .[] | (.labels // [])[] | select(startswith("Label_")) ]
+  unknown="$(jq -r --slurpfile cache "$CACHE_FILE" --slurpfile map "$LABEL_FILE" '
+      [ .[] | $cache[0][.].lab // [] | .[] ]
       | map(select($map[0][.] == null))
       | length
-    ' <<<"$messages" 2>/dev/null)"
+    ' <<<"$ids" 2>/dev/null)"
   case "$unknown" in ''|*[!0-9]*) return 0 ;; 0) return 0 ;; esac
 
   # Nested labels arrive as "parent/child"; the leaf is what identifies the
@@ -204,31 +257,22 @@ fill_labels() {
   [ -n "$fetched" ] && printf '%s\n' "$fetched" > "$LABEL_FILE"
 }
 
-# Fetch snippet and timestamp for every id we have never seen. Both are fixed
-# for the life of a message, so this runs once per message and a refresh of an
-# unchanged inbox costs nothing.
+# Everything about a message that never changes: subject, sender, snippet,
+# timestamp, thread and which of your labels it carries. Fetched once per id
+# and kept, so a page you have already visited costs nothing to revisit.
 fill_cache() {
-  local messages="$1" missing tmp id attach
-
+  local ids missing tmp id attach
   missing="$(jq -r --slurpfile cache "$CACHE_FILE" '
-      [.[] | .id | select(. != null)]
-      | map(select($cache[0][.] == null))
-      | .[]
-    ' <<<"$messages" 2>/dev/null)"
+      .[] | select($cache[0][.] == null)
+    ' <<<"$1" 2>/dev/null)"
   [ -n "$missing" ] || return 0
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-gmail-inbox.XXXXXX")" || return 0
 
-  # Whether a message carries an attachment is not in the triage output and not
-  # in the metadata format either — only `format:full` has the part list, and
-  # that drags the whole body along. One search settles it for the entire page
-  # instead, and since it never changes for a given message it is cached with
-  # the rest and only ever asked once.
-  attach="$(gws_gmail users messages list \
-      --params "$(jq -nc --arg q "$QUERY has:attachment" --argjson n "$(max_messages)" \
-                    '{userId:"me",q:$q,maxResults:$n}')" \
-    | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
-  case "$attach" in ''|*[!0-9a-f\[\]\",]*) attach='[]' ;; esac
+  # Whether a message carries an attachment is not in the metadata format —
+  # only format:full has the part list, and that drags the whole body along.
+  # One search settles it for the page instead.
+  attach="$(id_set "$QUERY has:attachment")"
 
   # The id reaches the worker as an argument, never spliced into its source by
   # xargs. It is already filtered to hex above, but a value from the API has no
@@ -240,13 +284,19 @@ fill_cache() {
       id="$1"
       out="$2"
       params=$(jq -nc --arg id "$id" \
-        "{userId:\"me\",id:\$id,format:\"metadata\",metadataHeaders:[\"Subject\"]}")
+        "{userId:\"me\",id:\$id,format:\"metadata\",metadataHeaders:[\"Subject\",\"From\"]}")
       gws gmail users messages get --params "$params" 2>/dev/null \
-        | jq -c "{(.id): {snippet: (.snippet // \"\"), ts: ((.internalDate // \"0\") | tonumber? // 0), threadId: (.threadId // .id)}}" \
-        > "$out/$id.json" 2>/dev/null
+        | jq -c "{(.id): {
+              subject: ((.payload.headers // [] | map(select(.name == \"Subject\")) | .[0].value) // \"\"),
+              from: ((.payload.headers // [] | map(select(.name == \"From\")) | .[0].value) // \"\"),
+              snippet: (.snippet // \"\"),
+              ts: ((.internalDate // \"0\") | tonumber? // 0),
+              threadId: (.threadId // .id),
+              lab: [(.labelIds // [])[] | select(startswith(\"Label_\"))]
+            }}" > "$out/$id.json" 2>/dev/null
     ' _ {} "$tmp"
 
-  # Merge in one go and keep the file bounded: an inbox churns, and a cache
+  # Merge in one go and keep the file bounded: a mailbox churns, and a cache
   # that only ever grows is a log of everything that passed through it.
   local merged
   merged="$(jq -s --argjson attach "$attach" '
@@ -258,7 +308,7 @@ fill_cache() {
                       | from_entries))
       | to_entries
       | sort_by(-(.value.ts // 0))
-      | .[0:500]
+      | .[0:1000]
       | from_entries
     ' "$CACHE_FILE" "$tmp"/*.json 2>/dev/null)"
   [ -n "$merged" ] && printf '%s\n' "$merged" > "$CACHE_FILE"
@@ -269,14 +319,20 @@ fill_cache() {
 # Everything the panel draws, shaped here rather than in QML: the widget
 # should render a list, not parse mail headers.
 render() {
-  local messages="$1" unread="$2" total="$3" email="$4"
+  local ids="$1" live_unread="$2" live_starred="$3" unread="$4" total="$5"
+  local email="$6" next="$7" current="$8" unread_only="$9"
   jq -nc \
-    --argjson messages "$messages" \
+    --argjson ids "$ids" \
+    --argjson liveUnread "$live_unread" \
+    --argjson liveStarred "$live_starred" \
     --slurpfile cache "$CACHE_FILE" \
     --slurpfile labelmap "$LABEL_FILE" \
     --argjson unread "$unread" \
     --argjson total "$total" \
-    --arg email "$email" '
+    --arg email "$email" \
+    --arg next "$next" \
+    --arg current "$current" \
+    --arg unreadOnly "$unread_only" '
     def entity:
       gsub("&lt;";"<") | gsub("&gt;";">") | gsub("&quot;";"\"")
       | gsub("&#39;";"'"'"'") | gsub("&nbsp;";" ") | gsub("&amp;";"&");
@@ -291,37 +347,39 @@ render() {
         else $m.addr end;
 
     ($labelmap[0] // {}) as $names
-    # Gmail hangs a dozen bookkeeping labels on every message — INBOX, the
-    # CATEGORY_ tabs, IMPORTANT, the star colour. Only the ones you made
-    # yourself say anything a reader did not already know.
-    | def mine: [ .[] | select(startswith("Label_")) | $names[.] | select(. != null) ];
+    # Gmail hangs a dozen bookkeeping labels on every message. Only the ones
+    # you made yourself say anything a reader did not already know.
+    | def mine: [ .[] | $names[.] | select(. != null) ];
 
     ($cache[0] // {}) as $c
+    | ($liveUnread | map({(.): true}) | add // {}) as $isUnread
+    | ($liveStarred | map({(.): true}) | add // {}) as $isStarred
     | {
         ok: true,
         email: $email,
         unread: $unread,
         total: $total,
+        nextPage: $next,
+        thisPage: $current,
+        unreadOnly: ($unreadOnly != ""),
         messages: [
-          $messages[]
-          | select(.id != null)
-          | . as $m
-          | ($c[$m.id] // {}) as $extra
+          $ids[]
+          | . as $id
+          | ($c[$id] // {}) as $m
           | {
-              id: $m.id,
-              threadId: ($extra.threadId // $m.id),
+              id: $id,
+              threadId: ($m.threadId // $id),
               subject: ((($m.subject // "") | entity) as $s
                         | if ($s | length) > 0 then $s else "(no subject)" end),
               from: (($m.from // "") | entity | sender),
-              snippet: (($extra.snippet // "") | entity),
-              ts: (($extra.ts // 0) / 1000 | floor),
-              unread: (($m.labels // []) | index("UNREAD") != null),
-              starred: (($m.labels // []) | index("STARRED") != null),
-              attachment: ($extra.att // false),
-              labels: (($m.labels // []) | mine)
+              snippet: (($m.snippet // "") | entity),
+              ts: (($m.ts // 0) / 1000 | floor),
+              unread: ($isUnread[$id] == true),
+              starred: ($isStarred[$id] == true),
+              attachment: ($m.att // false),
+              labels: (($m.lab // []) | mine)
             }
         ]
-        | sort_by(-.ts)
       }'
 }
 
@@ -400,119 +458,147 @@ cmd_read_all() {
 # however long the demo has been switched on.
 cmd_demo() {
   case "${1:-}" in
-    on)  printf 'plain\n' > "$DEMO_FILE"; printf '{"ok":true,"demo":"plain"}\n' ;;
-    fun) printf 'fun\n' > "$DEMO_FILE"; printf '{"ok":true,"demo":"fun"}\n' ;;
+    on)  : > "$DEMO_FILE"; printf '{"ok":true,"demo":true}\n' ;;
     off) rm -f -- "$DEMO_FILE"; printf '{"ok":true,"demo":false}\n' ;;
-    *)   die "demo takes on, fun or off" ;;
+    *)   die "demo takes on or off" ;;
   esac
 }
 
+# Real GitHub notifications from public open-source repositories, trimmed to
+# fit: nothing here is private mail, and nothing here is invented.
+# Real GitHub notifications from public open-source repositories, trimmed to
+# fit: nothing here is private mail, and nothing here is invented. There are
+# more of them than fit on a page on purpose — the demo has to be able to show
+# the pager, which is the one control you cannot photograph without one.
 demo_list() {
-  case "$(head -n1 -- "$DEMO_FILE" 2>/dev/null)" in
-    fun) demo_fun ;;
-    *)   demo_plain ;;
-  esac
-}
+  local unread_only="" page=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --unread) unread_only=1 ;;
+      --page)   shift; page="${1:-1}" ;;
+    esac
+    shift
+  done
+  case "$page" in ''|*[!0-9]*) page=1 ;; esac
 
-# A quieter inbox, for the readme: it has to show what a row is made of
-# without the reader having to get the joke first.
-demo_plain() {
-  jq -nc --argjson now "$(date +%s)" '
-    def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $labels):
+  jq -nc --argjson now "$(date +%s)" --argjson size "$(max_messages)" \
+         --argjson page "$page" --arg unreadOnly "$unread_only" '
+    def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $att; $labels):
       { id: $id, threadId: $id, subject: $subject, from: $from,
         snippet: $snippet, ts: ($now - ($mins * 60)),
-        unread: $unread, starred: $starred, labels: $labels };
-    {
-      ok: true,
-      email: "you@example.com",
-      messages: [
-        m("d000000000000a01"; 4;    "Priya Raghunathan"; "Re: Friday demo — moved to 3pm";
-          "Works for me. I moved the room booking too, so we have the big screen this time.";
-          true; false; []),
-        m("d000000000000a02"; 38;   "Tom Bakker";        "Invoice 2026-0841 is overdue";
-          "Hi, our records show invoice 2026-0841 has not been paid yet. Could you check whether";
-          true; true; ["billing"]),
-        m("d000000000000a03"; 95;   "GitHub";            "Pull request opened";
-          "sam-dev wants to merge 3 commits into main from fix/badge-width. Files changed: 2";
-          true; false; ["github"]),
-        m("d000000000000a04"; 180;  "Anna Kowalski";     "Notes from the architecture review";
-          "Attached are the notes. The main open question is whether we keep the cache in front";
-          true; true; ["team"]),
-        m("d000000000000a05"; 420;  "Fly.io";            "Deployment finished for wandering-fog-4821";
-          "Your app was deployed successfully. 2 machines updated in ams. View the release at";
-          false; false; []),
-        m("d000000000000a06"; 1300; "Marc Delacroix";    "Lunch next week?";
-          "I am in town Tuesday through Thursday. Any of those work for you? Happy to come by";
-          true; false; []),
-        m("d000000000000a07"; 2600; "Stripe";            "Your payout of €1,284.00 is on the way";
-          "This payout should arrive in your bank account on Monday. It covers 41 payments made";
-          false; false; ["billing"]),
-        m("d000000000000a08"; 4400; "Linear";            "3 issues assigned to you this week";
-          "ENG-412 Panel drops keyboard focus, ENG-418 Snippet cache grows without bound, ENG-";
-          false; false; ["team"])
-      ]
-    }
-    | .unread = ([.messages[] | select(.unread)] | length)
-    | .total = (.messages | length)'
-}
-
-# The one for posting. These are real GitHub notifications from public
-# open-source repositories, trimmed to fit: nothing here is private mail, and
-# nothing here is invented.
-demo_fun() {
-  jq -nc --argjson now "$(date +%s)" '
-    def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $labels):
-      { id: $id, threadId: $id, subject: $subject, from: $from,
-        snippet: $snippet, ts: ($now - ($mins * 60)),
-        unread: $unread, starred: $starred, labels: $labels };
-    {
-      ok: true,
-      email: "you@example.com",
-      messages: [
-        m("d000000000000b01"; 8;    "Tobias Lütke";
-          "Re: [tobi/omasnap] feat(editor): show the pixel size of the frame you are drawing (PR #72)";
-          "Merged #72 into main.";
-          true; true; ["github"]),
-        m("d000000000000b02"; 35;   "David Heinemeier Hansson";
-          "Re: [basecamp/omarchy] Quattro (PR #6231)";
-          "No. Everything is tightly integrated.";
-          true; false; []),
-        m("d000000000000b03"; 130;  "HANCORE";
-          "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Omasweeper (Issue #1149)";
-          "Manual static review found a stale bar-layout migration and an input race before restore";
-          true; false; ["github"]),
-        m("d000000000000b04"; 260;  "Anthony";
-          "Re: [tobi/omasnap] feat(editor): show the pixel size of the frame (PR #72)";
-          "Thanks for working on this! I opened a similar discussion on the Omarchy repo last week";
-          true; false; []),
-        m("d000000000000b05"; 490;  "Jeff Yang";
-          "Re: [basecamp/omarchy] Quattro (PR #6231)";
-          "Would it be possible to release Quattro as a standalone package for other distributions?";
-          true; false; []),
-        m("d000000000000b06"; 1380; "Geert-Johan Riemer";
-          "[jankeesvw/omarchy-unifi-protect] Restart the watcher once the settings arrive (PR #3)";
-          "The bar assigns a widget its settings from a Qt.callLater, one event-loop turn later";
-          true; false; []),
-        m("d000000000000b07"; 1700; "Copilot";
-          "Re: [basecamp/omarchy] Add a notifications.position setting for centered toasts (PR #7367)";
-          "Copilot was unable to run its full agentic suite in this review.";
-          false; false; ["github"]),
-        m("d000000000000b08"; 2100; "github-actions[bot]";
-          "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Omasweeper (Issue #1149)";
-          "Closed #1149 as completed.";
-          false; false; ["github"]),
-        m("d000000000000b09"; 9800; "David Heinemeier Hansson";
-          "[basecamp/omarchy] Release v4.0.0 - v4.0.0";
-          "Tag: v4.0.0 · Commit: f002044 · Released by: dhh. The Quattro Release.";
-          false; true; [])
-      ]
-    }
-    | .unread = ([.messages[] | select(.unread)] | length)
-    | .total = (.messages | length)'
+        unread: $unread, starred: $starred, attachment: $att, labels: $labels };
+    [
+      m("d000000000000b01"; 8;    "Tobias Lütke";
+        "Re: [tobi/omasnap] feat(editor): show the pixel size of the frame you are drawing (PR #72)";
+        "Merged #72 into main."; true; true; false; ["github"]),
+      m("d000000000000b02"; 35;   "David Heinemeier Hansson";
+        "Re: [basecamp/omarchy] Quattro (PR #6231)";
+        "No. Everything is tightly integrated."; true; false; false; []),
+      m("d000000000000b03"; 130;  "HANCORE";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Omasweeper (Issue #1149)";
+        "Manual static review found a stale bar-layout migration and an input race before restore";
+        true; false; false; ["github"]),
+      m("d000000000000b04"; 260;  "Anthony";
+        "Re: [tobi/omasnap] feat(editor): show the pixel size of the frame (PR #72)";
+        "Thanks for working on this! I opened a similar discussion on the Omarchy repo last week";
+        true; false; true; []),
+      m("d000000000000b05"; 490;  "Jeff Yang";
+        "Re: [basecamp/omarchy] Quattro (PR #6231)";
+        "Would it be possible to release Quattro as a standalone package for other distributions?";
+        true; false; false; []),
+      m("d000000000000b06"; 700;  "Luke Hsiao";
+        "Re: [basecamp/omarchy] Quattro (PR #6231)";
+        "Would you consider merging #6696 before the official release? It makes the theme source";
+        true; false; false; []),
+      m("d000000000000b07"; 980;  "github-advanced-security[bot]";
+        "Re: [basecamp/omarchy] Quattro (PR #6231)";
+        "1 new alert including 1 medium severity security vulnerability."; false; false; false; ["github"]),
+      m("d000000000000b08"; 1380; "Geert-Johan Riemer";
+        "[jankeesvw/omarchy-unifi-protect] Restart the watcher once the settings arrive (PR #3)";
+        "The bar assigns a widget its settings from a Qt.callLater, one event-loop turn later";
+        true; false; false; []),
+      m("d000000000000b09"; 1700; "Copilot";
+        "Re: [basecamp/omarchy] Add a notifications.position setting for centered toasts (PR #7367)";
+        "Copilot was unable to run its full agentic suite in this review."; false; false; false; ["github"]),
+      m("d000000000000b10"; 2100; "github-actions[bot]";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Omasweeper (Issue #1149)";
+        "Closed #1149 as completed."; false; false; false; ["github"]),
+      m("d000000000000b11"; 2600; "Alonso David De León Rodarte";
+        "Re: [basecamp/omarchy] Quattro (PR #6231)";
+        "Congratulations on the release. Is there a migration guide for custom waybar configs?";
+        false; false; false; []),
+      m("d000000000000b12"; 3100; "Tsurg";
+        "Re: [basecamp/omarchy] Quattro (PR #6231)";
+        "Tested on a fresh install this morning, no issues so far on an AMD laptop."; false; false; false; []),
+      m("d000000000000b13"; 4200; "github-actions[bot]";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Notification Center (Issue #1147)";
+        "Closed #1147 as completed."; false; false; false; ["github"]),
+      m("d000000000000b14"; 5200; "github-actions[bot]";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: Workspace name (Issue #1148)";
+        "Updated and verified. Verification applies only to the exact marketplace snapshot.";
+        false; false; false; ["github"]),
+      m("d000000000000b15"; 6100; "HANCORE";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Plugin]: Tesla (Issue #703)";
+        "Approved. The listing goes live with the next marketplace build."; false; true; false; ["github"]),
+      m("d000000000000b16"; 7300; "dependabot[bot]";
+        "[jankeesvw/omarchy-tesla] Bump the rack group across 1 directory (PR #12)";
+        "Bumps the rack group with 1 update. Release notes and changelog attached."; false; false; true; ["github"]),
+      m("d000000000000b17"; 8800; "Ryan Hughes";
+        "[basecamp/omarchy] Release v3.8.1 - v3.8.1";
+        "Tag: v3.8.1 · Released by: rhughes. Fixes the idle inhibitor on multi-monitor setups.";
+        false; false; false; []),
+      m("d000000000000b18"; 9800; "David Heinemeier Hansson";
+        "[basecamp/omarchy] Release v4.0.0 - v4.0.0";
+        "Tag: v4.0.0 · Commit: f002044 · Released by: dhh. The Quattro Release."; false; true; false; []),
+      m("d000000000000b19"; 11500; "David Heinemeier Hansson";
+        "Re: [basecamp/omarchy] I18n week starts on Monday (Issue #1239)";
+        "Good catch. Want to send a PR?"; false; false; false; []),
+      m("d000000000000b20"; 13000; "coderabbitai[bot]";
+        "Re: [bjarneo/cliamp] feat(spotify): search albums and open them from the results (PR #318)";
+        "Walkthrough: the search handler now paginates around the Development Mode limit.";
+        false; false; false; ["github"]),
+      m("d000000000000b21"; 15000; "David Heinemeier Hansson";
+        "[basecamp/omarchy] Release v3.8.0 - v3.8.0";
+        "Tag: v3.8.0 · Released by: dhh. New theme picker and a faster first boot."; false; false; false; []),
+      m("d000000000000b22"; 17000; "dependabot[bot]";
+        "[jankeesvw/omasweeper] Bump actions/checkout from 4 to 5 (PR #2)";
+        "Bumps actions/checkout from 4 to 5. Commits and release notes attached."; false; false; true; ["github"]),
+      m("d000000000000b23"; 19000; "HANCORE";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Plugin]: Workspace name (Issue #648)";
+        "Static review clean. Moving to the verification queue."; false; false; false; ["github"]),
+      m("d000000000000b24"; 22000; "David Heinemeier Hansson";
+        "[basecamp/omarchy] Release v3.7.0 - v3.7.0";
+        "Tag: v3.7.0 · Released by: dhh. Quattro preview lands behind a flag."; false; false; false; []),
+      m("d000000000000b25"; 25000; "github-actions[bot]";
+        "Re: [HANCORE-linux/omarchy-plugin-marketplace] [Verify]: UniFi Protect (Issue #620)";
+        "Closed #620 as completed."; false; false; false; ["github"]),
+      m("d000000000000b26"; 28000; "Ryan Hughes";
+        "[basecamp/omarchy] Release v3.7.1 - v3.7.1";
+        "Tag: v3.7.1 · Released by: rhughes. Reverts the cursor theme change."; false; false; false; []),
+      m("d000000000000b27"; 32000; "coderabbitai[bot]";
+        "Re: [bjarneo/cliamp] fix(spotify): page search around the Development Mode limit (PR #315)";
+        "No blocking issues found. One nitpick about the retry backoff."; false; false; false; ["github"]),
+      m("d000000000000b28"; 36000; "David Heinemeier Hansson";
+        "[basecamp/omarchy] Release v3.6.0 - v3.6.0";
+        "Tag: v3.6.0 · Released by: dhh. Plugin manifests gain a settings schema."; false; false; false; [])
+    ]
+    | (if $unreadOnly != "" then map(select(.unread)) else . end) as $all
+    | ($all | length) as $count
+    | (($page - 1) * $size) as $offset
+    | {
+        ok: true,
+        email: "you@example.com",
+        total: $count,
+        unread: ([$all[] | select(.unread)] | length),
+        nextPage: (if $offset + $size < $count then ($page + 1 | tostring) else "" end),
+        thisPage: ($page | tostring),
+        unreadOnly: ($unreadOnly != ""),
+        messages: $all[$offset : $offset + $size]
+      }'
 }
 
 case "${1:-list}" in
-  list)     if demo_on; then demo_list; else cmd_list; fi ;;
+  list)     shift; if demo_on; then demo_list "$@"; else cmd_list "$@"; fi ;;
   read)     if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}" read; fi ;;
   unread)   if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}" unread; fi ;;
   read-all) if demo_on; then printf '{"ok":true,"marked":0}\n'; else cmd_read_all; fi ;;
