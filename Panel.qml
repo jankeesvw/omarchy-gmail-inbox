@@ -13,13 +13,13 @@ import qs.Ui
 // the header clears the whole inbox at once.
 //
 // Data comes from `bin/gmail-inbox`, which talks to the Google Workspace CLI
-// (`gws`). No token or address is handled here — the script hands over a
+// (`gws`). No token or address is handled here - the script hands over a
 // finished list and this file only draws it.
 //
 // Every string below the header comes from a mail someone else wrote, so each
 // Text carries `textFormat: Text.PlainText`. Left on the default AutoText, Qt
 // decides for itself that a subject looks like markup and renders it as rich
-// text, and rich text really does load `<img src="http://...">` — a request
+// text, and rich text really does load `<img src="http://...">` - a request
 // out of the shell process to a server the sender picked.
 //
 // Glyphs are \u escapes rather than literal characters, so the source
@@ -148,14 +148,14 @@ Panel {
 
   // Message ids come from the API, so they are input, and this one ends up in
   // a URL a browser opens. A value shaped like anything else means the other
-  // side is not what we think it is — refuse it instead of tidying it up.
+  // side is not what we think it is - refuse it instead of tidying it up.
   function validId(id) {
     return /^[0-9a-f]{1,32}$/.test(String(id))
   }
 
   // "Inbox (10 emails, 6 unread)", with the address on the line underneath.
   // Both counts describe the whole label rather than the slice on screen,
-  // which is the same thing the badge counts — the panel lists at most
+  // which is the same thing the badge counts - the panel lists at most
   // OMARCHY_GMAIL_MAX of them.
   function titleText() {
     return "Inbox (" + root.total + (root.total === 1 ? " email" : " emails")
@@ -163,7 +163,7 @@ Panel {
   }
 
   // Which account the browser opens. `/mail/u/<address>/` is not a path Gmail
-  // has — it 404s, encoded or not; only `/mail/u/<index>/` exists. The address
+  // has - it 404s, encoded or not; only `/mail/u/<index>/` exists. The address
   // goes in `authuser`, which is a query and therefore belongs before the
   // fragment. Anything not shaped like an address is left off entirely, so the
   // link falls back to whichever account the browser is already signed in to.
@@ -276,7 +276,7 @@ Panel {
     openMessage(messages[cursor])
   }
 
-  // "2m", "4h", "3d" — a mail's age is a glance, not a timestamp. Anything
+  // "2m", "4h", "3d" - a mail's age is a glance, not a timestamp. Anything
   // past a month is dated instead, because "6w" stops meaning much.
   function ageLabel(ts) {
     if (!ts || ts <= 0) return ""
@@ -447,15 +447,25 @@ Panel {
       // Only activateRequested, never returnRequested as well: Enter fires
       // both, and a handler on each runs the action twice.
       onActivateRequested: root.activateCursor()
+      // Gmail's own keys where Gmail has one, so the hand already knows them:
+      // j/k move (handled by the key catcher), o opens, s stars, shift+I marks
+      // read and shift+U marks it back to unread. Gmail has no key for paging
+      // a list or for filtering to unread, so those get the obvious letters.
       onTextKey: function(t) {
         var onCursor = root.cursor >= 0 && root.cursor < root.messages.length
-        if (t === "r" && onCursor)
-          root.toggleRead(root.messages[root.cursor])
+        if (t === "o" && onCursor)
+          root.openMessage(root.messages[root.cursor])
         else if (t === "s" && onCursor)
           root.toggleStar(root.messages[root.cursor])
+        else if (t === "I" && onCursor)
+          root.setRead(root.messages[root.cursor].id, true)
+        else if (t === "U" && onCursor)
+          root.setRead(root.messages[root.cursor].id, false)
+        else if (t === "r" && onCursor)
+          root.toggleRead(root.messages[root.cursor])
         else if (t === "a")
           root.markAllRead()
-        else if (t === "u")
+        else if (t === "f")
           root.toggleUnreadOnly()
         else if (t === "n")
           root.goNextPage()
@@ -552,7 +562,7 @@ Panel {
         // A failed refresh keeps the list it already had, because a stale inbox
         // beats an empty one. But then the only sign that anything is wrong is
         // a slightly dimmer icon in the bar, and a list that quietly stops
-        // moving reads as a quiet mailbox — so say it here as well. Expired
+        // moving reads as a quiet mailbox - so say it here as well. Expired
         // credentials are the case this exists for.
         Item {
           width: parent.width
@@ -656,7 +666,7 @@ Panel {
                   // dot works, its stroke lands under one pixel and vanishes.
                   font.pixelSize: row.modelData.unread ? Style.space(7) : Style.space(10)
                   // Filled and in the accent while unread, an outline once it
-                  // has been read — faint enough to stay a marker rather than
+                  // has been read - faint enough to stay a marker rather than
                   // become a second row of bullets down the list.
                   color: row.modelData.unread
                     ? root.accent
@@ -681,7 +691,7 @@ Panel {
                   // Labels first, the way Gmail itself puts them: they say
                   // which pile a message belongs to, which is the thing you
                   // want before you have read the subject. Two at most, and
-                  // never the system ones — the script has already dropped
+                  // never the system ones - the script has already dropped
                   // INBOX, the CATEGORY_ tabs and the star colour.
                   Row {
                     id: line
@@ -824,7 +834,7 @@ Panel {
                     text: {
                       var body = row.modelData.snippet || ""
                       if (body === "") return ""
-                      return (fromLabel.text !== "" ? "  —  " : "") + body
+                      return (fromLabel.text !== "" ? "  -  " : "") + body
                     }
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
@@ -843,7 +853,7 @@ Panel {
 
         // Only there when there is somewhere to go. Gmail hands out one token
         // at a time and only forwards, so "how many pages" is a question the
-        // API cannot answer — hence a position rather than a count.
+        // API cannot answer - hence a position rather than a count.
         Item {
           width: parent.width
           height: (root.hasPrev || root.hasNext) ? pagerRow.implicitHeight + Style.space(8) : 0

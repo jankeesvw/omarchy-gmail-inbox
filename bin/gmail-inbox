@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gmail-inbox — data source for the Omarchy Gmail bar widget.
+# gmail-inbox - data source for the Omarchy Gmail bar widget.
 #
 # Everything goes through the Google Workspace CLI (`gws`), which owns the
 # OAuth token; no credential of any kind passes through this script or its
@@ -11,7 +11,7 @@
 #   gmail-inbox read-all         mark every unread message in the inbox as read
 #   gmail-inbox star <id>        add the star
 #   gmail-inbox unstar <id>      take it off
-#   gmail-inbox demo on|off      a fixed inbox for screenshots
+#   gmail-inbox demo on|off      a fixed demo inbox, for screenshots
 #
 # Every write turns into a no-op while a demo is on, so a screenshot session
 # can never touch a real mailbox.
@@ -45,7 +45,7 @@ export PATH
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-gmail-inbox/config"
 
 # The shell is started by uwsm with an environment of its own, so exporting a
-# variable in your login shell — or even `systemctl --user set-environment` —
+# variable in your login shell - or even `systemctl --user set-environment` -
 # does not reach the widget. A config file does. Parsed key by key rather than
 # sourced: a file that gets executed is a file that can run anything.
 read_config() {
@@ -101,7 +101,7 @@ max_messages() {
 
 # Message ids come back from the API, so they are input. They end up in a URL
 # the browser opens and in an API request, and a value shaped like anything
-# else is a sign the other side is not what we think it is — so refuse it
+# else is a sign the other side is not what we think it is - so refuse it
 # rather than try to clean it up.
 valid_id() {
   [[ "$1" =~ ^[0-9a-f]{1,32}$ ]]
@@ -139,7 +139,7 @@ ensure_json_object() {
 
 demo_on() { [ -e "$DEMO_FILE" ]; }
 
-demo_on || command -v gws >/dev/null 2>&1 || die "gws not found on PATH — see the README"
+demo_on || command -v gws >/dev/null 2>&1 || die "gws not found on PATH - see the README"
 
 gws_gmail() {
   gws gmail "$@" 2>/dev/null
@@ -167,12 +167,12 @@ account_email() {
 #
 # The panel used to come out of one `+triage` call, which is one request for
 # the whole page. That helper has no pageToken, though, so paging meant moving
-# to messages.list — which returns ids and nothing else. Subject, sender and
+# to messages.list - which returns ids and nothing else. Subject, sender and
 # snippet therefore come from the per-message cache now; none of them ever
 # change, so a page you have seen before still costs nothing.
 #
 # Read state and stars do change, and are read fresh every time as two id
-# searches — one request each, however long the page is.
+# searches - one request each, however long the page is.
 
 cmd_list() {
   local unread_only="" token="" max page ids next counts unread total email
@@ -197,7 +197,7 @@ cmd_list() {
     jq -nc --arg q "$eff_query" --argjson n "$max" --arg t "$token" \
       '{userId:"me",q:$q,maxResults:$n} + (if $t == "" then {} else {pageToken:$t} end)')")"
   ids="$(printf '%s' "$page" | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
-  [ -n "$ids" ] || die "could not read the inbox — is gws authenticated?"
+  [ -n "$ids" ] || die "could not read the inbox - is gws authenticated?"
   next="$(printf '%s' "$page" | jq -r '.nextPageToken // empty' 2>/dev/null)"
   case "$next" in *[!A-Za-z0-9_-]*) next="" ;; esac
 
@@ -236,7 +236,7 @@ id_set() {
 
 # Your own labels come back as ids ("Label_8071185..."), never as the names you
 # gave them, so they need a lookup table. Names change rarely, and a new one
-# announces itself by turning up as an id we cannot resolve — so the table is
+# announces itself by turning up as an id we cannot resolve - so the table is
 # only refetched when that happens, and costs nothing the rest of the time.
 fill_labels_from_cache() {
   local ids unknown fetched
@@ -269,7 +269,7 @@ fill_cache() {
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-gmail-inbox.XXXXXX")" || return 0
 
-  # Whether a message carries an attachment is not in the metadata format —
+  # Whether a message carries an attachment is not in the metadata format -
   # only format:full has the part list, and that drags the whole body along.
   # One search settles it for the page instead.
   attach="$(id_set "$QUERY has:attachment")"
@@ -416,13 +416,13 @@ cmd_star() {
 cmd_read_all() {
   local page ids token batch body count marked=0 rounds=0
 
-  # Everything unread in the label, not only what the panel happens to list —
+  # Everything unread in the label, not only what the panel happens to list -
   # "mark all as read" that leaves some behind is worse than no button. One
   # request caps at 500 ids and hands back a nextPageToken for the rest, so a
   # single call silently stops there: on a label with 3383 unread it would
   # clear 500 and leave 2883 behind, with the badge as the only hint. Walk the
   # pages instead. The round cap is a runaway guard, not a limit anyone reaches
-  # — 40 pages is 20.000 messages.
+  # - 40 pages is 20.000 messages.
   while [ "$rounds" -lt 40 ]; do
     rounds=$((rounds + 1))
     page="$(gws_gmail users messages list --params "$(
@@ -466,10 +466,10 @@ cmd_demo() {
 
 # Real GitHub notifications from public open-source repositories, trimmed to
 # fit: nothing here is private mail, and nothing here is invented.
-# Real GitHub notifications from public open-source repositories, trimmed to
-# fit: nothing here is private mail, and nothing here is invented. There are
-# more of them than fit on a page on purpose — the demo has to be able to show
-# the pager, which is the one control you cannot photograph without one.
+# A fixed demo inbox: made-up traffic modelled on public open-source
+# notifications, so a screenshot never carries anyone's mail. Deliberately
+# longer than one page, because the pager is the one control that cannot be
+# photographed without something to page through.
 demo_list() {
   local unread_only="" page=1
   while [ $# -gt 0 ]; do
