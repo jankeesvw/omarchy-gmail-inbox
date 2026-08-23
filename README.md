@@ -4,8 +4,6 @@ An Omarchy bar widget for your Gmail inbox: the unread count sits in the bar,
 and the panel lists what is waiting — subject, sender, the first line of the
 body, and how long it has been there.
 
-![The unread count in the bar](screenshots/bar.png)
-
 ![The panel, listing eight messages](screenshots/panel.png)
 
 - **Unread count in the bar.** The exact total for the whole inbox, not just
