@@ -10,9 +10,12 @@
 #   gmail-inbox read-all         mark every unread message in the inbox as read
 #   gmail-inbox star <id>        add the star
 #   gmail-inbox unstar <id>      take it off
-#   gmail-inbox demo <on|off>    fixed English inbox for screenshots; every
-#                                write turns into a no-op while it is on, so a
-#                                demo can never touch a real mailbox
+#   gmail-inbox demo on          a plain fixed inbox, for screenshots
+#   gmail-inbox demo fun         the same but written to be posted
+#   gmail-inbox demo off
+#
+# Every write turns into a no-op while a demo is on, so a screenshot session
+# can never touch a real mailbox.
 #
 # `list` costs two API calls on a warm cache. The subject, sender and
 # read state come from one `+triage` call, so the unread dots are never
@@ -327,13 +330,23 @@ cmd_read_all() {
 # however long the demo has been switched on.
 cmd_demo() {
   case "${1:-}" in
-    on)  : > "$DEMO_FILE"; printf '{"ok":true,"demo":true}\n' ;;
+    on)  printf 'plain\n' > "$DEMO_FILE"; printf '{"ok":true,"demo":"plain"}\n' ;;
+    fun) printf 'fun\n' > "$DEMO_FILE"; printf '{"ok":true,"demo":"fun"}\n' ;;
     off) rm -f -- "$DEMO_FILE"; printf '{"ok":true,"demo":false}\n' ;;
-    *)   die "demo takes on or off" ;;
+    *)   die "demo takes on, fun or off" ;;
   esac
 }
 
 demo_list() {
+  case "$(head -n1 -- "$DEMO_FILE" 2>/dev/null)" in
+    fun) demo_fun ;;
+    *)   demo_plain ;;
+  esac
+}
+
+# A quieter inbox, for the readme: it has to show what a row is made of
+# without the reader having to get the joke first.
+demo_plain() {
   jq -nc --argjson now "$(date +%s)" '
     def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $labels):
       { id: $id, threadId: $id, subject: $subject, from: $from,
@@ -367,6 +380,53 @@ demo_list() {
         m("d000000000000a08"; 4400; "Linear";            "3 issues assigned to you this week";
           "ENG-412 Panel drops keyboard focus, ENG-418 Snippet cache grows without bound, ENG-";
           false; false; ["team"])
+      ]
+    }
+    | .unread = ([.messages[] | select(.unread)] | length)'
+}
+
+# The one for posting. Everything in here is a joke about the machine this
+# runs on; nothing in it is anybody's actual mail.
+demo_fun() {
+  jq -nc --argjson now "$(date +%s)" '
+    def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $labels):
+      { id: $id, threadId: $id, subject: $subject, from: $from,
+        snippet: $snippet, ts: ($now - ($mins * 60)),
+        unread: $unread, starred: $starred, labels: $labels };
+    {
+      ok: true,
+      email: "you@example.com",
+      messages: [
+        m("d000000000000b01"; 2;    "X";                 "DHH quoted your post. Again.";
+          "Three in one week now. Your notifications tab has stopped loading entirely.";
+          true; true; ["x"]),
+        m("d000000000000b02"; 18;   "X";                 "412 new followers while you slept";
+          "Turns out shipping one plugin a day is a growth strategy. Do not tell marketing.";
+          true; false; ["x"]),
+        m("d000000000000b03"; 47;   "Arch Linux";        "1,204 packages can be upgraded";
+          "You ran pacman -Syu eleven minutes ago. We admire the commitment, truly.";
+          true; false; ["arch"]),
+        m("d000000000000b04"; 125;  "Omasnap";           "Feature request: make the ruler lie";
+          "Our designer insists 4px is basically 8px and would like the readout to agree.";
+          true; false; ["omasnap"]),
+        m("d000000000000b05"; 190;  "systemd";           "Failed to start something you never configured";
+          "Job failed with result dependency. See journalctl -xeu for 4,000 unhelpful lines.";
+          true; false; []),
+        m("d000000000000b06"; 380;  "Quickshell";        "Your widget has implicitWidth 0";
+          "It is invisible and unclickable. You will work this out in about two hours.";
+          true; false; ["omarchy"]),
+        m("d000000000000b07"; 560;  "Hyprland";          "Config reloaded. Mostly.";
+          "All 47 keybindings survived. The one you were changing did not. Sorry.";
+          false; false; ["omarchy"]),
+        m("d000000000000b08"; 1500; "Wayland Protocols"; "Re: screen sharing (2019-2026)";
+          "Still no. Attached: 200 pages on why not, and a roadmap that ends in 2031.";
+          false; true; []),
+        m("d000000000000b09"; 1900; "Neovim";            "You have been in insert mode for six hours";
+          "Escape is still in the top left corner. No pressure. Just checking in.";
+          false; false; []),
+        m("d000000000000b10"; 3400; "Omarchy Plugins";   "Plugin 1 of 7 is live";
+          "Six to go this week. The bar has room for two more before it becomes a monitor.";
+          false; false; ["ship-it"])
       ]
     }
     | .unread = ([.messages[] | select(.unread)] | length)'

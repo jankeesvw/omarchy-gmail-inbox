@@ -109,9 +109,13 @@ from your shell process to a server the sender picked.
 ## Screenshots without your own mail in them
 
 ```bash
-bin/gmail-inbox demo on     # fixed English inbox, every write becomes a no-op
+bin/gmail-inbox demo on     # a plain inbox, for showing what a row is made of
+bin/gmail-inbox demo fun    # the one written for posting: it is all jokes
 bin/gmail-inbox demo off
 ```
+
+Both are fixed lists with no network behind them, and every write turns into a
+no-op while either is on — a demo can never touch a real mailbox.
 
 ## License
 
