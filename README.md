@@ -10,6 +10,11 @@ body, and how long it has been there.
   what fits in the panel.
 - **A dot per unread message**, which doubles as the button that clears it, so
   a newsletter can be dismissed without opening it.
+- **Stars**, shown where you set them and settable from the panel. The slot
+  stays empty rather than absent, so the ages line up down one column.
+- **Your own labels** as chips in front of the subject, resolved from label id
+  to the name you gave it. Gmail's own bookkeeping — `INBOX`, the category
+  tabs, `IMPORTANT` — is left out; it says nothing you did not know.
 - **Mark all as read** from the header, covering every unread message in the
   inbox rather than only the ones on screen.
 - **Click a message** to open it in your browser, signed in to the right
@@ -58,9 +63,11 @@ o.bind("SUPER + M", "Gmail", "omarchy-shell shell toggle jankeesvw.gmail-inbox")
 | Middle-click the bar icon | refresh now |
 | Click a message | open it in the browser and mark it read |
 | Click its dot | mark it read, panel stays open |
+| Click its star | star or unstar it, panel stays open |
 | `↑` `↓` or `j` `k` | move through the list |
 | `Enter` or `Space` | open the message under the cursor |
 | `r` | mark that one read |
+| `s` | star or unstar it |
 | `a` | mark everything read |
 | `Esc` | close |
 
@@ -86,6 +93,12 @@ Snippets and timestamps never change once a message exists, so those are
 cached per message id under `$XDG_CACHE_HOME/omarchy-gmail-inbox` (mode 700,
 capped at 500 entries) and only fetched for messages that have not been seen
 before. An inbox that has not changed therefore costs no extra calls at all.
+
+Labels arrive as ids (`Label_8071185…`), never as names, so the script keeps a
+second table beside it. A label you have just created announces itself by
+turning up as an id the table cannot resolve, which is the only thing that
+triggers a refetch — so renaming or adding a label fixes itself, and the
+lookup costs nothing the rest of the time.
 
 Everything the panel draws is shaped by the script; the QML only renders a
 list. Every `Text` in it is `Text.PlainText`, because subjects and snippets

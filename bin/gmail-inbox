@@ -8,6 +8,8 @@
 #   gmail-inbox list             {"ok":true,"email":"...","unread":9,"messages":[...]}
 #   gmail-inbox read <id>        mark one message as read
 #   gmail-inbox read-all         mark every unread message in the inbox as read
+#   gmail-inbox star <id>        add the star
+#   gmail-inbox unstar <id>      take it off
 #   gmail-inbox demo <on|off>    fixed English inbox for screenshots; every
 #                                write turns into a no-op while it is on, so a
 #                                demo can never touch a real mailbox
@@ -44,6 +46,7 @@ LABEL="${OMARCHY_GMAIL_LABEL:-INBOX}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gmail-inbox"
 CACHE_FILE="$CACHE_DIR/messages.json"
 PROFILE_FILE="$CACHE_DIR/profile.json"
+LABEL_FILE="$CACHE_DIR/labels.json"
 DEMO_FILE="$CACHE_DIR/demo"
 
 die() {
@@ -138,7 +141,31 @@ cmd_list() {
   email="$(account_email)" || email=""
 
   fill_cache "$messages"
+  fill_labels "$messages"
   render "$messages" "$unread" "$email"
+}
+
+# Your own labels come back as ids ("Label_8071185..."), never as the names you
+# gave them, so they need a lookup table. Names change rarely, and a new one
+# announces itself by turning up as an id we cannot resolve — so the table is
+# only refetched when that happens, and costs nothing the rest of the time.
+fill_labels() {
+  local messages="$1" unknown fetched
+  [ -r "$LABEL_FILE" ] || printf '{}\n' > "$LABEL_FILE"
+
+  unknown="$(jq -r --slurpfile map "$LABEL_FILE" '
+      [ .[] | (.labels // [])[] | select(startswith("Label_")) ]
+      | map(select($map[0][.] == null))
+      | length
+    ' <<<"$messages" 2>/dev/null)"
+  case "$unknown" in ''|*[!0-9]*) return 0 ;; 0) return 0 ;; esac
+
+  # Nested labels arrive as "parent/child"; the leaf is what identifies the
+  # label at a glance, and the full path never fits in a chip anyway.
+  fetched="$(gws_gmail users labels list --params '{"userId":"me"}' \
+    | jq -c '[.labels[]? | select(.type == "user")
+              | {key: .id, value: (.name | split("/") | last)}] | from_entries' 2>/dev/null)"
+  [ -n "$fetched" ] && printf '%s\n' "$fetched" > "$LABEL_FILE"
 }
 
 # Fetch snippet and timestamp for every id we have never seen. Both are fixed
@@ -196,6 +223,7 @@ render() {
   jq -nc \
     --argjson messages "$messages" \
     --slurpfile cache "$CACHE_FILE" \
+    --slurpfile labelmap "$LABEL_FILE" \
     --argjson unread "$unread" \
     --arg email "$email" '
     def entity:
@@ -210,6 +238,12 @@ render() {
       | if $m == null then ($raw | ltrimstr(" ") | rtrimstr(" "))
         elif ($m.name | length) > 0 then $m.name
         else $m.addr end;
+
+    ($labelmap[0] // {}) as $names
+    # Gmail hangs a dozen bookkeeping labels on every message — INBOX, the
+    # CATEGORY_ tabs, IMPORTANT, the star colour. Only the ones you made
+    # yourself say anything a reader did not already know.
+    | def mine: [ .[] | select(startswith("Label_")) | $names[.] | select(. != null) ];
 
     ($cache[0] // {}) as $c
     | {
@@ -229,7 +263,9 @@ render() {
               from: (($m.from // "") | entity | sender),
               snippet: (($extra.snippet // "") | entity),
               ts: (($extra.ts // 0) / 1000 | floor),
-              unread: (($m.labels // []) | index("UNREAD") != null)
+              unread: (($m.labels // []) | index("UNREAD") != null),
+              starred: (($m.labels // []) | index("STARRED") != null),
+              labels: (($m.labels // []) | mine)
             }
         ]
         | sort_by(-.ts)
@@ -244,6 +280,20 @@ cmd_read() {
   gws_gmail users messages modify \
     --params "$(jq -nc --arg id "$id" '{userId:"me",id:$id}')" \
     --json '{"removeLabelIds":["UNREAD"]}' >/dev/null || die "could not mark as read"
+  printf '{"ok":true}\n'
+}
+
+cmd_star() {
+  local id="${1:-}" action="${2:-}" body
+  valid_id "$id" || die "not a message id"
+  case "$action" in
+    star)   body='{"addLabelIds":["STARRED"]}' ;;
+    unstar) body='{"removeLabelIds":["STARRED"]}' ;;
+    *)      die "unknown star action" ;;
+  esac
+  gws_gmail users messages modify \
+    --params "$(jq -nc --arg id "$id" '{userId:"me",id:$id}')" \
+    --json "$body" >/dev/null || die "could not change the star"
   printf '{"ok":true}\n'
 }
 
@@ -285,29 +335,38 @@ cmd_demo() {
 
 demo_list() {
   jq -nc --argjson now "$(date +%s)" '
-    def m($id; $mins; $from; $subject; $snippet; $unread):
+    def m($id; $mins; $from; $subject; $snippet; $unread; $starred; $labels):
       { id: $id, threadId: $id, subject: $subject, from: $from,
-        snippet: $snippet, ts: ($now - ($mins * 60)), unread: $unread };
+        snippet: $snippet, ts: ($now - ($mins * 60)),
+        unread: $unread, starred: $starred, labels: $labels };
     {
       ok: true,
       email: "you@example.com",
       messages: [
         m("d000000000000a01"; 4;    "Priya Raghunathan"; "Re: Friday demo — moved to 3pm";
-          "Works for me. I moved the room booking too, so we have the big screen this time."; true),
+          "Works for me. I moved the room booking too, so we have the big screen this time.";
+          true; false; []),
         m("d000000000000a02"; 38;   "Tom Bakker";        "Invoice 2026-0841 is overdue";
-          "Hi, our records show invoice 2026-0841 has not been paid yet. Could you check whether"; true),
-        m("d000000000000a03"; 95;   "GitHub";            "[omarchy-gmail-inbox] Pull request opened";
-          "sam-dev wants to merge 3 commits into main from fix/badge-width. Files changed: 2"; true),
+          "Hi, our records show invoice 2026-0841 has not been paid yet. Could you check whether";
+          true; true; ["billing"]),
+        m("d000000000000a03"; 95;   "GitHub";            "Pull request opened";
+          "sam-dev wants to merge 3 commits into main from fix/badge-width. Files changed: 2";
+          true; false; ["github"]),
         m("d000000000000a04"; 180;  "Anna Kowalski";     "Notes from the architecture review";
-          "Attached are the notes. The main open question is whether we keep the cache in front"; true),
+          "Attached are the notes. The main open question is whether we keep the cache in front";
+          true; true; ["team"]),
         m("d000000000000a05"; 420;  "Fly.io";            "Deployment finished for wandering-fog-4821";
-          "Your app was deployed successfully. 2 machines updated in ams. View the release at"; false),
+          "Your app was deployed successfully. 2 machines updated in ams. View the release at";
+          false; false; []),
         m("d000000000000a06"; 1300; "Marc Delacroix";    "Lunch next week?";
-          "I am in town Tuesday through Thursday. Any of those work for you? Happy to come by"; true),
+          "I am in town Tuesday through Thursday. Any of those work for you? Happy to come by";
+          true; false; []),
         m("d000000000000a07"; 2600; "Stripe";            "Your payout of €1,284.00 is on the way";
-          "This payout should arrive in your bank account on Monday. It covers 41 payments made"; false),
+          "This payout should arrive in your bank account on Monday. It covers 41 payments made";
+          false; false; ["billing"]),
         m("d000000000000a08"; 4400; "Linear";            "3 issues assigned to you this week";
-          "ENG-412 Panel drops keyboard focus, ENG-418 Snippet cache grows without bound, ENG-"; false)
+          "ENG-412 Panel drops keyboard focus, ENG-418 Snippet cache grows without bound, ENG-";
+          false; false; ["team"])
       ]
     }
     | .unread = ([.messages[] | select(.unread)] | length)'
@@ -317,6 +376,8 @@ case "${1:-list}" in
   list)     if demo_on; then demo_list; else cmd_list; fi ;;
   read)     if demo_on; then printf '{"ok":true}\n'; else cmd_read "${2:-}"; fi ;;
   read-all) if demo_on; then printf '{"ok":true,"marked":0}\n'; else cmd_read_all; fi ;;
+  star)     if demo_on; then printf '{"ok":true}\n'; else cmd_star "${2:-}" star; fi ;;
+  unstar)   if demo_on; then printf '{"ok":true}\n'; else cmd_star "${2:-}" unstar; fi ;;
   demo)     cmd_demo "${2:-}" ;;
   *)        die "unknown command" ;;
 esac

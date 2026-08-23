@@ -39,11 +39,17 @@ Panel {
   readonly property string iconDot: "\uF111"
   readonly property string iconCheck: "\uF00C"
   readonly property string iconExternal: "\uF08E"
+  readonly property string iconStar: "\uF005"
+  readonly property string iconStarEmpty: "\uF006"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   // A full inbox is normal, not an alarm, so the badge takes the theme accent
   // rather than the bar's urgent red.
   readonly property color accent: Color.accent
+  // The one colour here that does not come from the theme. A star is amber in
+  // every mail client there is, and a star in the theme's accent would be
+  // indistinguishable from the unread dot right beside it.
+  readonly property color starColor: "#E5A44B"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   property var messages: []
@@ -116,26 +122,35 @@ Panel {
   }
 
   // The list is a plain JS array, so a row is updated by handing over a new
-  // one. Done locally as well as on the server: the badge should drop the
-  // moment you click, not a refresh later.
-  function markLocalRead(id) {
+  // one. Applied locally as well as on the server: the badge and the star
+  // should follow the click, not the refresh a moment later.
+  function patchMessage(id, changes) {
     var next = []
     var changed = false
     for (var i = 0; i < messages.length; i++) {
       var m = messages[i]
-      if (m.id === id && m.unread) {
-        changed = true
-        next.push({
-          id: m.id, threadId: m.threadId, subject: m.subject, from: m.from,
-          snippet: m.snippet, ts: m.ts, unread: false
-        })
-      } else {
+      if (m.id !== id) {
         next.push(m)
+        continue
       }
+      var copy = {}
+      for (var key in m) copy[key] = m[key]
+      for (var field in changes) copy[field] = changes[field]
+      next.push(copy)
+      changed = true
     }
-    if (!changed) return
-    messages = next
-    if (unread > 0) unread -= 1
+    if (changed) messages = next
+    return changed
+  }
+
+  function markLocalRead(id) {
+    for (var i = 0; i < messages.length; i++) {
+      if (messages[i].id !== id) continue
+      if (!messages[i].unread) return
+      patchMessage(id, { unread: false })
+      if (unread > 0) unread -= 1
+      return
+    }
   }
 
   function openMessage(message) {
@@ -165,6 +180,14 @@ Panel {
     markingAll = true
     readAllProc.command = [root.script, "read-all"]
     readAllProc.running = true
+  }
+
+  function toggleStar(message) {
+    if (!message || !validId(message.id) || starProc.running) return
+    var wanted = !message.starred
+    patchMessage(message.id, { starred: wanted })
+    starProc.command = [root.script, wanted ? "star" : "unstar", message.id]
+    starProc.running = true
   }
 
   function moveCursor(delta) {
@@ -243,6 +266,12 @@ Panel {
       root.markingAll = false
       root.refresh()
     }
+  }
+
+  // No refresh on exit: the star is already drawn, and a reload here would
+  // pull the whole list out from under a run of quick stars.
+  Process {
+    id: starProc
   }
 
   Timer {
@@ -339,8 +368,11 @@ Panel {
       // both, and a handler on each runs the action twice.
       onActivateRequested: root.activateCursor()
       onTextKey: function(t) {
-        if (t === "r" && root.cursor >= 0 && root.cursor < root.messages.length)
+        var onCursor = root.cursor >= 0 && root.cursor < root.messages.length
+        if (t === "r" && onCursor)
           root.markRead(root.messages[root.cursor].id)
+        else if (t === "s" && onCursor)
+          root.toggleStar(root.messages[root.cursor])
         else if (t === "a")
           root.markAllRead()
       }
@@ -511,26 +543,102 @@ Panel {
                   width: parent.width
                   height: subject.implicitHeight
 
-                  Text {
-                    id: subject
+                  // Labels first, the way Gmail itself puts them: they say
+                  // which pile a message belongs to, which is the thing you
+                  // want before you have read the subject. Two at most, and
+                  // never the system ones — the script has already dropped
+                  // INBOX, the CATEGORY_ tabs and the star colour.
+                  Row {
+                    id: line
                     anchors.left: parent.left
+                    anchors.right: starSlot.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(5)
+
+                    Row {
+                      id: chips
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(3)
+                      visible: (row.modelData.labels || []).length > 0
+
+                      Repeater {
+                        model: (row.modelData.labels || []).slice(0, 2)
+
+                        Rectangle {
+                          required property string modelData
+                          anchors.verticalCenter: parent.verticalCenter
+                          height: chipText.implicitHeight + Style.space(3)
+                          width: chipText.implicitWidth + Style.space(8)
+                          radius: Style.space(3)
+                          color: Qt.rgba(root.foreground.r, root.foreground.g,
+                                         root.foreground.b, 0.14)
+
+                          Text {
+                            id: chipText
+                            anchors.centerIn: parent
+                            text: parent.modelData
+                            textFormat: Text.PlainText
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                            color: Qt.darker(root.foreground, 1.35)
+                          }
+                        }
+                      }
+                    }
+
+                    Text {
+                      id: subject
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: line.width - (chips.visible ? chips.width + line.spacing : 0)
+                      text: row.modelData.subject
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      // Weight carries the read state along with the dot, so
+                      // the list can be read without hunting for the marker.
+                      font.bold: row.modelData.unread
+                      color: row.modelData.unread ? root.foreground : Qt.darker(root.foreground, 1.3)
+                    }
+                  }
+
+                  // The star keeps its slot whether it is set or not, so the
+                  // ages stay in one column down the list. Empty and faint on
+                  // the row under the cursor, invisible everywhere else: it is
+                  // a control where you are looking and nothing where you are
+                  // not.
+                  Item {
+                    id: starSlot
                     anchors.right: age.left
-                    anchors.rightMargin: Style.space(8)
-                    text: row.modelData.subject
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    // Weight carries the read state along with the dot, so
-                    // the list can be read without hunting for the marker.
-                    font.bold: row.modelData.unread
-                    color: row.modelData.unread ? root.foreground : Qt.darker(root.foreground, 1.3)
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(14)
+                    height: Style.space(14)
+
+                    Text {
+                      anchors.centerIn: parent
+                      visible: row.modelData.starred || row.active
+                      text: row.modelData.starred ? root.iconStar : root.iconStarEmpty
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: row.modelData.starred
+                        ? root.starColor
+                        : Qt.darker(root.foreground, 1.9)
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleStar(row.modelData)
+                    }
                   }
 
                   Text {
                     id: age
                     anchors.right: parent.right
-                    anchors.baseline: subject.baseline
+                    anchors.verticalCenter: parent.verticalCenter
                     text: root.ageLabel(row.modelData.ts)
                     textFormat: Text.PlainText
                     font.family: root.fontFamily
