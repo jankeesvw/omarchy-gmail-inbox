@@ -20,6 +20,8 @@ body, and how long it has been there.
 - **Unread only**, one button, for when the read ones are in the way.
 - **Mark all as read**, covering every unread message in the label rather than
   only the page on screen.
+- **Archive or move to Trash from the keyboard**, with Gmail's own `e` and `#`
+  shortcuts. Trash is recoverable; this does not permanently delete mail.
 - **Click a message** to open it in your browser, signed in to the right
   account. It is marked read at the same time.
 
@@ -105,6 +107,8 @@ over: `gws auth logout`.
 | `↑` `↓` or `j` `k` | move through the list |
 | `Enter`, `Space` or `o` | open the message under the cursor |
 | `s` | star or unstar it |
+| `e` | archive it |
+| `#` | move it to Trash |
 | `Shift`+`I` | mark it read |
 | `Shift`+`U` | mark it unread |
 | `r` | toggle read either way |
@@ -114,8 +118,9 @@ over: `gws auth logout`.
 | `Esc` | close |
 
 The keys Gmail has are the keys Gmail uses: `j`/`k` to move, `o` to open, `s`
-to star, `Shift`+`I` and `Shift`+`U` for read and unread. Paging a list and
-filtering to unread have no Gmail equivalent, so those took the plain letters.
+to star, `e` to archive, `#` to move to Trash, and `Shift`+`I` and `Shift`+`U`
+for read and unread. Paging a list and filtering to unread have no Gmail
+equivalent, so those took the plain letters.
 
 The panel refreshes every minute, whether it is open or not, and again
 whenever you open it or change something.

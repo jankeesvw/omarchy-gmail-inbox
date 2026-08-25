@@ -62,7 +62,7 @@ Panel {
   property string email: ""
   property bool reachable: true
   property string errorText: ""
-  // Message the script is currently writing to, so its row can dim.
+  // Message the script is currently changing, so its row can dim.
   property string pendingId: ""
   property bool markingAll: false
   property int cursor: -1
@@ -269,6 +269,17 @@ Panel {
     starProc.running = true
   }
 
+  function runMessageAction(message, action) {
+    if (!message || !validId(message.id) || messageActionProc.running || pendingId !== "") return
+    if (action !== "archive" && action !== "trash") return
+    pendingId = message.id
+    messageActionProc.command = [root.script, action, message.id]
+    messageActionProc.running = true
+  }
+
+  function archiveMessage(message) { runMessageAction(message, "archive") }
+  function trashMessage(message) { runMessageAction(message, "trash") }
+
   function moveCursor(delta) {
     if (messages.length === 0) return
     var next = cursor + delta
@@ -355,6 +366,14 @@ Panel {
   // pull the whole list out from under a run of quick stars.
   Process {
     id: starProc
+  }
+
+  Process {
+    id: messageActionProc
+    onExited: function(exitCode) {
+      root.pendingId = ""
+      root.refresh()
+    }
   }
 
   Timer {
@@ -455,15 +474,20 @@ Panel {
       // both, and a handler on each runs the action twice.
       onActivateRequested: root.activateCursor()
       // Gmail's own keys where Gmail has one, so the hand already knows them:
-      // j/k move (handled by the key catcher), o opens, s stars, shift+I marks
-      // read and shift+U marks it back to unread. Gmail has no key for paging
-      // a list or for filtering to unread, so those get the obvious letters.
+      // j/k move (handled by the key catcher), o opens, s stars, e archives,
+      // # moves to Trash, shift+I marks read and shift+U marks it back to
+      // unread. Gmail has no key for paging a list or for filtering to unread,
+      // so those get the obvious letters.
       onTextKey: function(t) {
         var onCursor = root.cursor >= 0 && root.cursor < root.messages.length
         if (t === "o" && onCursor)
           root.openMessage(root.messages[root.cursor])
         else if (t === "s" && onCursor)
           root.toggleStar(root.messages[root.cursor])
+        else if (t === "e" && onCursor)
+          root.archiveMessage(root.messages[root.cursor])
+        else if (t === "#" && onCursor)
+          root.trashMessage(root.messages[root.cursor])
         else if (t === "I" && onCursor)
           root.setRead(root.messages[root.cursor].id, true)
         else if (t === "U" && onCursor)
