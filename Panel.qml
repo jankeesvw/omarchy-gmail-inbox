@@ -62,8 +62,15 @@ Panel {
   property string email: ""
   property bool reachable: true
   property string errorText: ""
-  // Message the script is currently changing, so its row can dim.
+  // Message whose read state is changing, so its row can dim.
   property string pendingId: ""
+  // Archive and Trash remove a row immediately. Keep enough state to restore
+  // it if Gmail rejects the action.
+  property var pendingActionMessage: null
+  property int pendingActionIndex: -1
+  property int pendingActionUnread: 0
+  property int pendingActionTotal: 0
+  property bool ignoreListPayload: false
   property bool markingAll: false
   property int cursor: -1
 
@@ -111,7 +118,7 @@ Panel {
   }
 
   function refresh() {
-    if (listProc.running) return
+    if (listProc.running || messageActionProc.running) return
     var argv = [root.script, "list"]
     if (unreadOnly) argv.push("--unread")
     if (pageToken !== "" && validToken(pageToken)) argv.push("--page", pageToken)
@@ -269,10 +276,68 @@ Panel {
     starProc.running = true
   }
 
+  function removeMessageLocally(message) {
+    var index = -1
+    var next = []
+    for (var i = 0; i < messages.length; i++) {
+      if (messages[i].id === message.id) index = i
+      else next.push(messages[i])
+    }
+    if (index < 0) return false
+
+    pendingActionMessage = message
+    pendingActionIndex = index
+    pendingActionUnread = unread
+    pendingActionTotal = total
+    messages = next
+    if (total > 0) total -= 1
+    if (message.unread === true && unread > 0) unread -= 1
+    cursor = next.length === 0 ? -1 : Math.min(index, next.length - 1)
+    return true
+  }
+
+  function clearPendingMessageAction() {
+    pendingActionMessage = null
+    pendingActionIndex = -1
+    pendingActionUnread = 0
+    pendingActionTotal = 0
+  }
+
+  function restorePendingMessageAction(reason) {
+    if (!pendingActionMessage) return
+    var index = Math.max(0, Math.min(pendingActionIndex, messages.length))
+    var next = messages.slice()
+    next.splice(index, 0, pendingActionMessage)
+    messages = next
+    unread = pendingActionUnread
+    total = pendingActionTotal
+    cursor = index
+    clearPendingMessageAction()
+    reachable = false
+    errorText = reason
+  }
+
+  function finishMessageAction(text) {
+    var ok = false
+    var reason = "could not change the message"
+    try {
+      var data = JSON.parse(text)
+      ok = data.ok === true
+      reason = data.error || reason
+    } catch (e) {
+      reason = "unexpected output from gmail-widget"
+    }
+
+    if (ok) clearPendingMessageAction()
+    else restorePendingMessageAction(reason)
+  }
+
   function runMessageAction(message, action) {
-    if (!message || !validId(message.id) || messageActionProc.running || pendingId !== "") return
+    if (!message || !validId(message.id) || messageActionProc.running
+        || pendingActionMessage || pendingId !== "") return
     if (action !== "archive" && action !== "trash") return
-    pendingId = message.id
+    if (!removeMessageLocally(message)) return
+    if (listProc.running) ignoreListPayload = true
     messageActionProc.command = [root.script, action, message.id]
     messageActionProc.running = true
   }
@@ -310,6 +375,10 @@ Panel {
   function applyPayload(text) {
     try {
       var data = JSON.parse(text)
+      if (ignoreListPayload) {
+        ignoreListPayload = false
+        return
+      }
       reachable = data.ok === true
       errorText = data.error || ""
       if (!reachable) return
@@ -318,7 +387,9 @@ Panel {
       total = data.total || 0
       email = data.email || ""
       nextPage = validToken(data.nextPage) ? data.nextPage : ""
-      if (cursor > messages.length - 1) cursor = messages.length - 1
+      if (messages.length === 0) cursor = -1
+      else if (root.opened && cursor < 0) cursor = 0
+      else if (cursor > messages.length - 1) cursor = messages.length - 1
     } catch (e) {
       reachable = false
       errorText = "unexpected output from gmail-widget"
@@ -328,6 +399,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       now = Date.now() / 1000
+      if (messages.length > 0) cursor = 0
       refresh()
     } else {
       cursor = -1
@@ -370,9 +442,8 @@ Panel {
 
   Process {
     id: messageActionProc
-    onExited: function(exitCode) {
-      root.pendingId = ""
-      root.refresh()
+    stdout: StdioCollector {
+      onStreamFinished: root.finishMessageAction(text)
     }
   }
 
