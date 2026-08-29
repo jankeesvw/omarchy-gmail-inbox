@@ -11,6 +11,8 @@
 #   gmail-inbox read-all         mark every unread message in the inbox as read
 #   gmail-inbox star <id>        add the star
 #   gmail-inbox unstar <id>      take it off
+#   gmail-inbox archive <id>     remove the message from the inbox
+#   gmail-inbox trash <id>       move the message to Trash
 #   gmail-inbox demo on|off      a fixed demo inbox, for screenshots
 #
 # Every write turns into a no-op while a demo is on, so a screenshot session
@@ -437,6 +439,24 @@ cmd_star() {
   printf '{"ok":true}\n'
 }
 
+cmd_archive() {
+  local id="${1:-}"
+  valid_id "$id" || die "not a message id"
+  gws_gmail users messages modify \
+    --params "$(jq -nc --arg id "$id" '{userId:"me",id:$id}')" \
+    --json '{"removeLabelIds":["INBOX"]}' >/dev/null || die "could not archive the message"
+  printf '{"ok":true}\n'
+}
+
+cmd_trash() {
+  local id="${1:-}"
+  valid_id "$id" || die "not a message id"
+  gws_gmail users messages trash \
+    --params "$(jq -nc --arg id "$id" '{userId:"me",id:$id}')" >/dev/null \
+    || die "could not move the message to Trash"
+  printf '{"ok":true}\n'
+}
+
 cmd_read_all() {
   local page ids token batch body count marked=0 rounds=0
 
@@ -628,6 +648,8 @@ case "${1:-list}" in
   read-all) if demo_on; then printf '{"ok":true,"marked":0}\n'; else cmd_read_all; fi ;;
   star)     if demo_on; then printf '{"ok":true}\n'; else cmd_star "${2:-}" star; fi ;;
   unstar)   if demo_on; then printf '{"ok":true}\n'; else cmd_star "${2:-}" unstar; fi ;;
+  archive)  if demo_on; then printf '{"ok":true}\n'; else cmd_archive "${2:-}"; fi ;;
+  trash)    if demo_on; then printf '{"ok":true}\n'; else cmd_trash "${2:-}"; fi ;;
   demo)     cmd_demo "${2:-}" ;;
   *)        die "unknown command" ;;
 esac

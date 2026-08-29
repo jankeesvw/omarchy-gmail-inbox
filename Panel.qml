@@ -62,8 +62,15 @@ Panel {
   property string email: ""
   property bool reachable: true
   property string errorText: ""
-  // Message the script is currently writing to, so its row can dim.
+  // Message whose read state is changing, so its row can dim.
   property string pendingId: ""
+  // Archive and Trash remove a row immediately. Keep enough state to restore
+  // it if Gmail rejects the action.
+  property var pendingActionMessage: null
+  property int pendingActionIndex: -1
+  property int pendingActionUnread: 0
+  property int pendingActionTotal: 0
+  property bool ignoreListPayload: false
   property bool markingAll: false
   property int cursor: -1
 
@@ -111,7 +118,7 @@ Panel {
   }
 
   function refresh() {
-    if (listProc.running) return
+    if (listProc.running || messageActionProc.running) return
     var argv = [root.script, "list"]
     if (unreadOnly) argv.push("--unread")
     if (pageToken !== "" && validToken(pageToken)) argv.push("--page", pageToken)
@@ -269,6 +276,75 @@ Panel {
     starProc.running = true
   }
 
+  function removeMessageLocally(message) {
+    var index = -1
+    var next = []
+    for (var i = 0; i < messages.length; i++) {
+      if (messages[i].id === message.id) index = i
+      else next.push(messages[i])
+    }
+    if (index < 0) return false
+
+    pendingActionMessage = message
+    pendingActionIndex = index
+    pendingActionUnread = unread
+    pendingActionTotal = total
+    messages = next
+    if (total > 0) total -= 1
+    if (message.unread === true && unread > 0) unread -= 1
+    cursor = next.length === 0 ? -1 : Math.min(index, next.length - 1)
+    return true
+  }
+
+  function clearPendingMessageAction() {
+    pendingActionMessage = null
+    pendingActionIndex = -1
+    pendingActionUnread = 0
+    pendingActionTotal = 0
+  }
+
+  function restorePendingMessageAction(reason) {
+    if (!pendingActionMessage) return
+    var index = Math.max(0, Math.min(pendingActionIndex, messages.length))
+    var next = messages.slice()
+    next.splice(index, 0, pendingActionMessage)
+    messages = next
+    unread = pendingActionUnread
+    total = pendingActionTotal
+    cursor = index
+    clearPendingMessageAction()
+    reachable = false
+    errorText = reason
+  }
+
+  function finishMessageAction(text) {
+    var ok = false
+    var reason = "could not change the message"
+    try {
+      var data = JSON.parse(text)
+      ok = data.ok === true
+      reason = data.error || reason
+    } catch (e) {
+      reason = "unexpected output from gmail-widget"
+    }
+
+    if (ok) clearPendingMessageAction()
+    else restorePendingMessageAction(reason)
+  }
+
+  function runMessageAction(message, action) {
+    if (!message || !validId(message.id) || messageActionProc.running
+        || pendingActionMessage || pendingId !== "") return
+    if (action !== "archive" && action !== "trash") return
+    if (!removeMessageLocally(message)) return
+    if (listProc.running) ignoreListPayload = true
+    messageActionProc.command = [root.script, action, message.id]
+    messageActionProc.running = true
+  }
+
+  function archiveMessage(message) { runMessageAction(message, "archive") }
+  function trashMessage(message) { runMessageAction(message, "trash") }
+
   function moveCursor(delta) {
     if (messages.length === 0) return
     var next = cursor + delta
@@ -299,6 +375,10 @@ Panel {
   function applyPayload(text) {
     try {
       var data = JSON.parse(text)
+      if (ignoreListPayload) {
+        ignoreListPayload = false
+        return
+      }
       reachable = data.ok === true
       errorText = data.error || ""
       if (!reachable) return
@@ -307,7 +387,9 @@ Panel {
       total = data.total || 0
       email = data.email || ""
       nextPage = validToken(data.nextPage) ? data.nextPage : ""
-      if (cursor > messages.length - 1) cursor = messages.length - 1
+      if (messages.length === 0) cursor = -1
+      else if (root.opened && cursor < 0) cursor = 0
+      else if (cursor > messages.length - 1) cursor = messages.length - 1
     } catch (e) {
       reachable = false
       errorText = "unexpected output from gmail-widget"
@@ -317,6 +399,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       now = Date.now() / 1000
+      if (messages.length > 0) cursor = 0
       refresh()
     } else {
       cursor = -1
@@ -355,6 +438,13 @@ Panel {
   // pull the whole list out from under a run of quick stars.
   Process {
     id: starProc
+  }
+
+  Process {
+    id: messageActionProc
+    stdout: StdioCollector {
+      onStreamFinished: root.finishMessageAction(text)
+    }
   }
 
   Timer {
@@ -455,15 +545,20 @@ Panel {
       // both, and a handler on each runs the action twice.
       onActivateRequested: root.activateCursor()
       // Gmail's own keys where Gmail has one, so the hand already knows them:
-      // j/k move (handled by the key catcher), o opens, s stars, shift+I marks
-      // read and shift+U marks it back to unread. Gmail has no key for paging
-      // a list or for filtering to unread, so those get the obvious letters.
+      // j/k move (handled by the key catcher), o opens, s stars, e archives,
+      // # moves to Trash, shift+I marks read and shift+U marks it back to
+      // unread. Gmail has no key for paging a list or for filtering to unread,
+      // so those get the obvious letters.
       onTextKey: function(t) {
         var onCursor = root.cursor >= 0 && root.cursor < root.messages.length
         if (t === "o" && onCursor)
           root.openMessage(root.messages[root.cursor])
         else if (t === "s" && onCursor)
           root.toggleStar(root.messages[root.cursor])
+        else if (t === "e" && onCursor)
+          root.archiveMessage(root.messages[root.cursor])
+        else if (t === "#" && onCursor)
+          root.trashMessage(root.messages[root.cursor])
         else if (t === "I" && onCursor)
           root.setRead(root.messages[root.cursor].id, true)
         else if (t === "U" && onCursor)
