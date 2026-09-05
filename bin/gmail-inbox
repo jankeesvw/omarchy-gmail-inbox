@@ -99,8 +99,13 @@ PROFILE_FILE="$CACHE_DIR/profile.json"
 LABEL_FILE="$CACHE_DIR/labels.json"
 DEMO_FILE="$CACHE_DIR/demo"
 
+# The sentence is for a person to read. The optional second argument is for the
+# panel to branch on: matching the prose would break the moment the wording is
+# improved, and the two failures that have a way out need different setup
+# instructions.
 die() {
-  printf '{"ok":false,"error":%s}\n' "$(printf '%s' "$1" | jq -Rs .)"
+  printf '{"ok":false,"error":%s,"reason":%s}\n' \
+    "$(printf '%s' "$1" | jq -Rs .)" "$(printf '%s' "${2-}" | jq -Rs .)"
   exit 0
 }
 
@@ -165,10 +170,27 @@ ensure_json_object() {
 
 demo_on() { readable_file "$DEMO_FILE"; }
 
-demo_on || command -v gws >/dev/null 2>&1 || die "gws not found on PATH - see the README"
+demo_on || command -v gws >/dev/null 2>&1 || die "gws not found on PATH - see the README" "gws-missing"
 
 gws_gmail() {
   gws gmail "$@" 2>/dev/null
+}
+
+# gws reports a refused request as a JSON object on stdout and still exits 0.
+# Nothing downstream notices: `jq '[.messages[]?.id]'` over an error object is
+# a valid empty array, `[ -n "[]" ]` is true, and a mailbox nobody is signed in
+# to arrives at the panel as an inbox with nothing in it. So every answer that
+# matters is put through this first, and an error becomes a reason rather than
+# a quiet zero.
+gws_reason() {
+  local payload="$1" code
+  code="$(printf '%s' "$payload" | jq -r '.error.code // empty' 2>/dev/null)"
+  case "$code" in
+    '') return 1 ;;
+    401|403) printf 'not-authenticated' ;;
+    *) printf 'gws-error' ;;
+  esac
+  return 0
 }
 
 # ------------------------------------------------------------------ profile
@@ -215,6 +237,7 @@ cmd_list() {
   # the next request. Keep it to the shape tokens have.
   case "$token" in *[!A-Za-z0-9_-]*) token="" ;; esac
 
+  local reason
   max="$(max_messages)"
   eff_query="$QUERY"
   [ -n "$unread_only" ] && eff_query="is:unread $QUERY"
@@ -222,8 +245,14 @@ cmd_list() {
   page="$(gws_gmail users messages list --params "$(
     jq -nc --arg q "$eff_query" --argjson n "$max" --arg t "$token" \
       '{userId:"me",q:$q,maxResults:$n} + (if $t == "" then {} else {pageToken:$t} end)')")"
+  if reason="$(gws_reason "$page")"; then
+    if [ "$reason" = "not-authenticated" ]; then
+      die "not signed in to Google - run: gws auth login -s gmail" "$reason"
+    fi
+    die "Gmail refused the request - see gws auth status" "$reason"
+  fi
   ids="$(printf '%s' "$page" | jq -c '[.messages[]?.id | select(test("^[0-9a-f]{1,32}$"))]' 2>/dev/null)"
-  [ -n "$ids" ] || die "could not read the inbox - is gws authenticated?"
+  [ -n "$ids" ] || die "could not read the inbox - is gws authenticated?" "not-authenticated"
   next="$(printf '%s' "$page" | jq -r '.nextPageToken // empty' 2>/dev/null)"
   case "$next" in *[!A-Za-z0-9_-]*) next="" ;; esac
 

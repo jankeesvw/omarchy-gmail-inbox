@@ -62,6 +62,10 @@ Panel {
   property string email: ""
   property bool reachable: true
   property string errorText: ""
+  // The machine-readable half of a failure, so the setup instructions below can
+  // branch on it without matching the sentence a person reads.
+  property string errorReason: ""
+  property bool copiedPrompt: false
   // Message whose read state is changing, so its row can dim.
   property string pendingId: ""
   // Archive and Trash remove a row immediately. Keep enough state to restore
@@ -115,6 +119,65 @@ Panel {
   // fence.
   function validToken(t) {
     return /^[A-Za-z0-9_-]{1,512}$/.test(String(t))
+  }
+
+  // Whether this failure is one a setup step fixes. A cache directory that is
+  // not writable, or a missing jq, is a different kind of broken and gets no
+  // button: there is nothing useful to hand an agent that it could not work
+  // out from the sentence itself.
+  readonly property bool setupFixable:
+    errorReason === "gws-missing" || errorReason === "not-authenticated"
+
+  // An inbox that cannot show anything owes you the reason. "Gmail
+  // unreachable" is true and no use at all: nothing installed and nothing
+  // signed in need different things from you, so the difference is what this
+  // says. A heading, one line under it, and the button.
+  readonly property string blockedTitle: {
+    if (errorReason === "gws-missing") return "Google Workspace CLI is not installed"
+    if (errorReason === "not-authenticated") return "Not signed in to Google"
+    if (errorReason === "gws-error") return "Gmail refused the request"
+    return "Gmail unreachable"
+  }
+
+  readonly property string blockedHint: {
+    if (errorReason === "gws-missing")
+      return "This widget reads your inbox through gws.\nInstall it with npm, then sign in once."
+    if (errorReason === "not-authenticated")
+      return "gws is installed but has no credentials yet.\nSigning in opens a browser once."
+    if (errorReason === "gws-error")
+      return "Check what gws auth status says about this account."
+    return root.errorText
+  }
+
+  // The instructions, written as an order rather than as an explanation: it
+  // has to be something an agent can carry out without asking anything back.
+  // Two shapes, because a missing CLI and a CLI that is not signed in need
+  // different steps, and telling somebody to reinstall a working gws is how
+  // you lose their credentials.
+  readonly property string setupPrompt: errorReason === "not-authenticated" ?
+    "The omarchy-gmail-inbox bar widget on this Omarchy machine cannot read my " +
+    "inbox: gws is installed but not signed in.\n\n" +
+    "1. Run: gws auth setup\n   This sets up the Google Cloud project the CLI needs.\n" +
+    "2. Run: gws auth login -s gmail\n   This opens a browser once and needs an interactive terminal.\n" +
+    "3. Confirm it worked: gws auth status should report token_valid true.\n\n" +
+    "Do not reinstall or reconfigure gws beyond this, and do not create a second " +
+    "set of credentials: the widget reuses the token that login stores." :
+    "Set up the omarchy-gmail-inbox bar widget on this Omarchy machine. It reads " +
+    "my Gmail through the Google Workspace CLI, and that CLI is not installed yet.\n\n" +
+    "1. Install it: npm install -g @googleworkspace/cli\n   It needs Node 18 or newer.\n" +
+    "2. Run: gws auth setup\n   This sets up the Google Cloud project the CLI needs.\n" +
+    "3. Run: gws auth login -s gmail\n   This opens a browser once and needs an interactive terminal.\n" +
+    "4. Confirm it worked: gws auth status should report token_valid true.\n\n" +
+    "The widget needs nothing else. It calls gws and reuses the token that login " +
+    "stores, so there is no second login to set up."
+
+  // Onto the clipboard rather than into an agent this plugin starts itself.
+  // What comes next is a program with tools that installs software, and that
+  // is a step worth taking on purpose, in a terminal you are looking at.
+  function copySetupPrompt() {
+    copyProc.command = ["wl-copy", "--", root.setupPrompt]
+    copyProc.running = true
+    copiedPrompt = true
   }
 
   function refresh() {
@@ -172,6 +235,10 @@ Panel {
   // which is the same thing the badge counts - the panel lists at most
   // OMARCHY_GMAIL_MAX of them.
   function titleText() {
+    // Counts only when there is something behind them. A mailbox nobody is
+    // signed in to reads as an empty one if the header says zero of both, and
+    // that is the reading this whole panel is trying to correct.
+    if (!root.reachable) return "Inbox"
     return "Inbox (" + root.total + (root.total === 1 ? " email" : " emails")
          + ", " + root.unread + " unread)"
   }
@@ -355,6 +422,14 @@ Panel {
   }
 
   function activateCursor() {
+    // PanelKeyCatcher turns Tab into a signal of its own, so nothing inside
+    // this panel is reachable through the focus chain and the setup button
+    // would be mouse-only. With no list to walk there is nothing else Enter
+    // could mean, so it presses the one thing on screen.
+    if (messages.length === 0 && !reachable && setupFixable) {
+      copySetupPrompt()
+      return
+    }
     if (cursor < 0 || cursor >= messages.length) return
     openMessage(messages[cursor])
   }
@@ -381,6 +456,8 @@ Panel {
       }
       reachable = data.ok === true
       errorText = data.error || ""
+      errorReason = data.reason || ""
+      if (data.ok === true) copiedPrompt = false
       if (!reachable) return
       messages = data.messages || []
       unread = data.unread || 0
@@ -410,6 +487,13 @@ Panel {
   }
 
   Component.onCompleted: now = Date.now() / 1000
+
+  // The clipboard write. Nothing is read back: the label already says it
+  // landed, and a failed wl-copy leaves the old clipboard, which is the
+  // harmless outcome.
+  Process {
+    id: copyProc
+  }
 
   Process {
     id: listProc
@@ -668,8 +752,12 @@ Panel {
         // credentials are the case this exists for.
         Item {
           width: parent.width
-          height: root.reachable ? 0 : staleWarning.implicitHeight + Style.space(6)
-          visible: !root.reachable
+          // Only when there is still a list under it. With an empty list the
+          // block below says the same thing in the middle of the panel, and
+          // saying it twice makes it read as two different problems.
+          readonly property bool showStale: !root.reachable && root.messages.length > 0
+          height: showStale ? staleWarning.implicitHeight + Style.space(6) : 0
+          visible: showStale
 
           Text {
             id: staleWarning
@@ -1005,22 +1093,63 @@ Panel {
 
         Item {
           width: parent.width
-          height: root.messages.length === 0 ? Style.space(60) : 0
+          // Tall enough for the one-line empty state, and taller when the
+          // blocked state needs a heading, a hint and a button: a fixed height
+          // centres a column that outgrows it, and then the top of it sits over
+          // the separator above.
+          height: root.messages.length === 0
+            ? Math.max(Style.space(60), emptyState.implicitHeight + Style.space(24))
+            : 0
           visible: root.messages.length === 0
 
-          Text {
+          Column {
+            id: emptyState
             anchors.centerIn: parent
             width: parent.width - Style.space(20)
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-            text: root.reachable
-              ? (root.unreadOnly ? "Nothing unread." : "Inbox zero.")
-              : (root.errorText !== "" ? root.errorText : "Gmail unreachable")
-            textFormat: Text.PlainText
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            color: root.foreground
-            opacity: 0.6
+            spacing: Style.space(10)
+
+            // An empty inbox is one line. A blocked one is a heading and a
+            // hint, because the two are not the same kind of nothing.
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              text: root.reachable
+                ? (root.unreadOnly ? "Nothing unread." : "Inbox zero.")
+                : root.blockedTitle
+              textFormat: Text.PlainText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              color: root.foreground
+              opacity: root.reachable ? 0.6 : 0.85
+            }
+
+            Text {
+              width: parent.width
+              visible: !root.reachable && text !== ""
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              text: root.blockedHint
+              textFormat: Text.PlainText
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: root.foreground
+              opacity: 0.6
+            }
+
+            // Nobody installs a bar widget wanting to read a README first. The
+            // button puts the order on the clipboard, ready to hand to an agent
+            // that carries it out.
+            Button {
+              anchors.horizontalCenter: parent.horizontalCenter
+              visible: !root.reachable && root.setupFixable
+              focusable: true
+              text: root.copiedPrompt ? "Copied, paste it to your agent"
+                                      : "Copy setup instructions"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.copySetupPrompt()
+            }
           }
         }
       }
