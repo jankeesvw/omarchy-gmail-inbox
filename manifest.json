@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jankeesvw.gmail-inbox",
   "name": "Gmail Inbox",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Jankees",
   "description": "Unread count in the bar, with the inbox in a panel",
   "homepage": "https://github.com/jankeesvw/omarchy-gmail-inbox",
@@ -17,7 +17,7 @@
     "displayName": "Gmail Inbox",
     "description": "Unread count in the bar, with the inbox in a panel",
     "category": "Apps",
-    "allowMultiple": false,
+    "allowMultiple": true,
     "defaultSection": "right"
   }
 }

@@ -67,6 +67,20 @@ readable_file() {
 # variable in your login shell - or even `systemctl --user set-environment` -
 # does not reach the widget. A config file does. Parsed key by key rather than
 # sourced: a file that gets executed is a file that can run anything.
+# The sentence is for a person to read. The optional second argument is for the
+# panel to branch on: matching the prose would break the moment the wording is
+# improved, and the two failures that have a way out need different setup
+# instructions.
+die() {
+  printf '{"ok":false,"error":%s,"reason":%s}\n' \
+    "$(printf '%s' "$1" | jq -Rs .)" "$(printf '%s' "${2-}" | jq -Rs .)"
+  exit 0
+}
+
+# Anything below may call die(), so it is defined above all of it. bash only
+# knows a function after its definition, and a `check "$x" || die ...` before
+# that point fails as an ordinary false with "command not found" on stderr,
+# which the journal swallows: the guard is gone and nothing says so.
 read_config() {
   local line key value
   readable_file "$CONFIG_FILE" || return 0
@@ -81,33 +95,67 @@ read_config() {
       query) CFG_QUERY="$value" ;;
       label) CFG_LABEL="$value" ;;
       max)   CFG_MAX="$value" ;;
+      account) CFG_ACCOUNT="$value" ;;
+      # A key can be scoped to one account: `work.query = is:important`. The
+      # scoped value wins over the bare one, so a shared default and a mailbox
+      # that wants something else can live in the same file.
+      *.query) [ "${key%.query}" = "$ACCOUNT" ] && CFG_QUERY="$value" ;;
+      *.label) [ "${key%.label}" = "$ACCOUNT" ] && CFG_LABEL="$value" ;;
+      *.max)   [ "${key%.max}"   = "$ACCOUNT" ] && CFG_MAX="$value" ;;
     esac
   done < "$CONFIG_FILE"
 }
 
-CFG_QUERY=""; CFG_LABEL=""; CFG_MAX=""
+# The account name becomes a directory name twice over, in the gws config path
+# and in the cache path, so it is checked rather than escaped. Letters, digits,
+# dot, dash, underscore and at-sign: enough for an address, and `/`, `..` and
+# control characters are simply not in it. A name that does not fit is refused,
+# not repaired: a deviating value means the caller is not what we think it is.
+valid_account() {
+  case "$1" in
+    ''|.|..) return 1 ;;
+    *[!A-Za-z0-9._@-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 128 ]
+}
+
+# Read once with no account in scope, so `account =` itself is picked up, then
+# again with it set so the scoped keys can find their own name.
+CFG_QUERY=""; CFG_LABEL=""; CFG_MAX=""; CFG_ACCOUNT=""
+ACCOUNT=""
 read_config
+ACCOUNT="${OMARCHY_GMAIL_ACCOUNT:-$CFG_ACCOUNT}"
+if [ -n "$ACCOUNT" ]; then
+  valid_account "$ACCOUNT" || die "not an account name" "bad-account"
+  CFG_QUERY=""; CFG_LABEL=""; CFG_MAX=""
+  read_config
+fi
 
 # The environment still wins where it is set, so a one-off run can override
 # the file without editing it.
 QUERY="${OMARCHY_GMAIL_QUERY:-${CFG_QUERY:-in:inbox}}"
 LABEL="${OMARCHY_GMAIL_LABEL:-${CFG_LABEL:-INBOX}}"
 
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gmail-inbox"
+# gws resolves client_secret.json, credentials.enc, .encryption_key and
+# token_cache.json all through one config_dir(), so pointing that at a
+# directory per account is a complete boundary, token cache included. Doing it
+# with GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE instead moves the credentials and
+# leaves the token cache shared, which is how one account ends up reading
+# another's mail.
+if [ -n "$ACCOUNT" ]; then
+  export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gws/$ACCOUNT}"
+fi
+
+# The cache is per account for the same reason. profile.json holds the address
+# the panel puts in its header, so a shared cache does not just mix two lists,
+# it labels one mailbox with the other's name.
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-gmail-inbox"
+CACHE_DIR="$CACHE_ROOT"
+[ -n "$ACCOUNT" ] && CACHE_DIR="$CACHE_ROOT/$ACCOUNT"
 CACHE_FILE="$CACHE_DIR/messages.json"
 PROFILE_FILE="$CACHE_DIR/profile.json"
 LABEL_FILE="$CACHE_DIR/labels.json"
 DEMO_FILE="$CACHE_DIR/demo"
-
-# The sentence is for a person to read. The optional second argument is for the
-# panel to branch on: matching the prose would break the moment the wording is
-# improved, and the two failures that have a way out need different setup
-# instructions.
-die() {
-  printf '{"ok":false,"error":%s,"reason":%s}\n' \
-    "$(printf '%s' "$1" | jq -Rs .)" "$(printf '%s' "${2-}" | jq -Rs .)"
-  exit 0
-}
 
 # How many messages the panel lists. Clamped rather than trusted: this comes
 # from the environment, and it ends up in an API request and in a loop bound.
@@ -134,8 +182,13 @@ valid_id() {
 # mkdir -p follows a symlink to a directory and reports success, and leaves
 # the mode of a directory that was already there alone. Check the path itself
 # afterwards, and repair what an older version may have left world-readable.
+# $2, when set, is the one kind of subdirectory this level is allowed to hold:
+# "accounts" means a directory whose name passes valid_account stays, anything
+# else still goes. Without it a run with no account configured would sweep away
+# every per-account cache underneath it, since those are exactly the entries
+# the rule below calls "not a regular file".
 private_dir() {
-  local dir="$1" owner
+  local dir="$1" allow="${2-}" owner entry base
   mkdir -p -m 700 -- "$dir" 2>/dev/null
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
   owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || return 1
@@ -150,13 +203,34 @@ private_dir() {
   # Anything here that is not a regular file was never put here by this script,
   # and a symlink in one of these fixed names would send every write somewhere
   # of the planter's choosing.
-  find "$dir" -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf -- {} + 2>/dev/null
+  if [[ "$allow" == "accounts" ]]; then
+    # Same rule, one exception, and the exception is checked rather than
+    # assumed: a directory here survives only if its name is one this script
+    # could have created. A symlink named after an account is still a symlink
+    # and still goes, because -type d does not follow it.
+    while IFS= read -r -d '' entry; do
+      base="${entry##*/}"
+      [[ -d "$entry" && ! -L "$entry" ]] && valid_account "$base" && continue
+      [[ -f "$entry" && ! -L "$entry" ]] && continue
+      rm -rf -- "$entry" 2>/dev/null
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  else
+    find "$dir" -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf -- {} + 2>/dev/null
+  fi
   find "$dir" -mindepth 1 -maxdepth 1 -type f -exec chmod 600 -- {} + 2>/dev/null
 }
 
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 
-private_dir "$CACHE_DIR" || die "cache directory is not usable"
+# The top of the cache always allows account directories under it, whether or
+# not this particular run has an account: without an account it *is* the
+# directory the others sit in, and sweeping it as a leaf would take every
+# per-account cache with it. Doing it first also means its mode is ours rather
+# than whatever the umask gave it on the way through mkdir -p.
+private_dir "$CACHE_ROOT" accounts || die "cache directory is not usable"
+if [ "$CACHE_DIR" != "$CACHE_ROOT" ]; then
+  private_dir "$CACHE_DIR" || die "cache directory is not usable"
+fi
 
 # A cache file that is not a JSON object takes jq down with it, and --slurpfile
 # fails the whole run rather than the one lookup. That would leave the widget

@@ -147,6 +147,41 @@ Changes are picked up on the next refresh, so within a minute.
 `OMARCHY_GMAIL_QUERY`, `OMARCHY_GMAIL_LABEL` and `OMARCHY_GMAIL_MAX` do the
 same job for a one-off run from a terminal, and take precedence over the file.
 
+## More than one account
+
+One widget reads one mailbox, so two mailboxes means two widgets. Give each one an `account` in its bar entry in `~/.config/omarchy/shell.json`:
+
+```json
+{ "id": "jankeesvw.gmail-inbox", "account": "work" },
+{ "id": "jankeesvw.gmail-inbox", "account": "personal" }
+```
+
+The name is yours to pick; it becomes a directory name, so it is letters, digits, dot, dash, underscore and at-sign, and anything else is refused rather than cleaned up.
+
+An account gets its own `gws` configuration directory at `~/.config/gws/<account>`, and that is a complete boundary: `gws` resolves the client secret, the encrypted credentials, the encryption key and the token cache all through that one path, so signing one account in cannot reach the other's mail. Sign each one in separately:
+
+```bash
+GOOGLE_WORKSPACE_CLI_CONFIG_DIR=~/.config/gws/work gws auth login -s gmail
+```
+
+Its cache is separate too, at `~/.cache/omarchy-gmail-inbox/<account>`. That matters beyond tidiness: the cache holds the address the panel puts in its header, so a shared one would not just mix two lists, it would label one mailbox with the other's name.
+
+Keys in the config file can be scoped to an account, so a shared default and a mailbox that wants something else fit in the same file:
+
+```ini
+query = in:inbox
+work.query = in:inbox -label:newsletters
+work.max = 50
+```
+
+Each widget answers to its own IPC name, so a keybinding can open a particular mailbox:
+
+```bash
+omarchy-shell jankeesvw.gmail-inbox.work open
+```
+
+Without an `account` everything is where it always was, and the plain `jankeesvw.gmail-inbox` name still works.
+
 ## How it works
 
 `bin/gmail-inbox` is the whole backend; the QML only draws what it hands over.

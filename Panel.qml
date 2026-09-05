@@ -28,10 +28,33 @@ Panel {
   id: root
 
   moduleName: "jankeesvw.gmail-inbox"
-  ipcTarget: "jankeesvw.gmail-inbox"
+  // With allowMultiple on there can be two of these in one bar, and two
+  // handlers on one target means one of them silently never gets addressed.
+  // The account is what tells them apart, so it is part of the name:
+  // `omarchy-shell shell summon jankeesvw.gmail-inbox.work` opens that
+  // mailbox. Without an account the name is what it always was, so an
+  // existing keybinding keeps working.
+  ipcTarget: account === "" ? "jankeesvw.gmail-inbox"
+                            : "jankeesvw.gmail-inbox." + account
 
   // The script sits next to this file, so the plugin runs from wherever it
   // was installed without putting anything on $PATH.
+  // Which mailbox this instance is. Empty is the single-account case and the
+  // one everybody had before: no account directory, no per-account cache, the
+  // same paths as always. Set it in the widget's shell.json entry and this
+  // instance reads that account instead, with its own gws config directory and
+  // its own cache underneath it.
+  //
+  // Passed to the script through the environment rather than as an argument:
+  // every subcommand would otherwise have to grow a flag, and the script reads
+  // OMARCHY_GMAIL_ACCOUNT in one place, before anything else is decided.
+  readonly property string account: String(setting("account", "") || "")
+
+  // Handed to every Process that runs the script. An empty account leaves the
+  // environment alone, so a single-account install behaves exactly as it did.
+  readonly property var scriptEnv:
+    account === "" ? ({}) : ({ "OMARCHY_GMAIL_ACCOUNT": account })
+
   readonly property string script:
     Qt.resolvedUrl("bin/gmail-inbox").toString().replace(/^file:\/\//, "")
 
@@ -497,6 +520,7 @@ Panel {
 
   Process {
     id: listProc
+    environment: root.scriptEnv
     stdout: StdioCollector {
       onStreamFinished: root.applyPayload(text)
     }
@@ -504,6 +528,7 @@ Panel {
 
   Process {
     id: readProc
+    environment: root.scriptEnv
     onExited: function(exitCode) {
       root.pendingId = ""
       root.refresh()
@@ -512,6 +537,7 @@ Panel {
 
   Process {
     id: readAllProc
+    environment: root.scriptEnv
     onExited: function(exitCode) {
       root.markingAll = false
       root.refresh()
@@ -522,10 +548,12 @@ Panel {
   // pull the whole list out from under a run of quick stars.
   Process {
     id: starProc
+    environment: root.scriptEnv
   }
 
   Process {
     id: messageActionProc
+    environment: root.scriptEnv
     stdout: StdioCollector {
       onStreamFinished: root.finishMessageAction(text)
     }
