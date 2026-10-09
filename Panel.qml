@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Gmail: unread count in the bar, with a panel listing the inbox.
@@ -69,10 +70,10 @@ Panel {
   readonly property string iconPrev: "\uF053"
   readonly property string iconNext: "\uF054"
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   // A full inbox is normal, not an alarm, so the badge takes the theme accent
   // rather than the bar's urgent red.
-  readonly property color accent: Color.accent
+  readonly property color accent: Commons.Color.accent
   // The one colour here that does not come from the theme. A star is amber in
   // every mail client there is, and a star in the theme's accent would be
   // indistinguishable from the unread dot right beside it.
@@ -616,7 +617,7 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               renderType: Text.NativeRendering
-              color: Color.background
+              color: Commons.Color.background
             }
           }
         }
@@ -798,7 +799,7 @@ Panel {
             elide: Text.ElideRight
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            color: bar ? bar.urgent : Color.urgent
+            color: bar ? bar.urgent : Commons.Color.urgent
           }
         }
 
