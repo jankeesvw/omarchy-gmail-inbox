@@ -119,9 +119,7 @@ Panel {
   readonly property int badgeCount: unread
   readonly property bool hasUnread: unread > 0
 
-  // Width of the badge and of the whole icon+badge row. Computed here rather
-  // than read off the Row, because iconComponent is a Component with its own
-  // scope: ids inside it are not visible out here.
+  // Width of the badge and of the whole icon+badge row.
   readonly property int badgeWidth: badgeCount > 0
     ? Math.max(Style.space(12), String(badgeCount).length * Style.space(6) + Style.space(8))
     : 0
@@ -571,54 +569,52 @@ Panel {
     }
   }
 
-  // iconComponent rather than a text label, so the count can sit in a badge.
-  // Same hook the stock Basecamp plugin uses for its logo.
+  // Drawn by hand rather than as a text label, so the count can sit in a badge.
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     opacity: root.reachable ? 1 : 0.5
     slotSize: root.barSlot
-    // The icon component is loaded into a square canvas of opticalSize, meant
-    // for one glyph. Widen it too, or the icon falls outside it and only the
-    // badge survives.
-    opticalSize: root.barContentWidth
     // No hover tooltip: the panel is the detail view.
     tooltipText: ""
 
-    iconComponent: Component {
-      Item {
-        Row {
-          anchors.centerIn: parent
-          spacing: Style.space(5)
+    // Not an iconComponent: the shell scales that down to icon size, which
+    // would shrink the unread count next to the icon to a smudge.
+    hasVisualContent: true
+
+    Item {
+      anchors.fill: parent
+      Row {
+        anchors.centerIn: parent
+        spacing: Style.space(5)
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.iconEnvelope
+          textFormat: Text.PlainText
+          font.family: root.fontFamily
+          font.pixelSize: Style.bar.iconFont
+          renderType: Text.NativeRendering
+          color: root.opened ? root.accent : root.foreground
+        }
+
+        Rectangle {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.reachable && root.badgeCount > 0
+          height: Style.space(12)
+          width: root.badgeWidth
+          radius: height / 2
+          color: root.accent
 
           Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.iconEnvelope
+            anchors.centerIn: parent
+            text: root.badgeCount
             textFormat: Text.PlainText
             font.family: root.fontFamily
-            font.pixelSize: Style.bar.iconFont
+            font.pixelSize: Style.font.caption
             renderType: Text.NativeRendering
-            color: root.opened ? root.accent : root.foreground
-          }
-
-          Rectangle {
-            anchors.verticalCenter: parent.verticalCenter
-            visible: root.reachable && root.badgeCount > 0
-            height: Style.space(12)
-            width: root.badgeWidth
-            radius: height / 2
-            color: root.accent
-
-            Text {
-              anchors.centerIn: parent
-              text: root.badgeCount
-              textFormat: Text.PlainText
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              renderType: Text.NativeRendering
-              color: Commons.Color.background
-            }
+            color: Commons.Color.background
           }
         }
       }
