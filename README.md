@@ -12,6 +12,9 @@ body, and how long it has been there.
   read. Clicking it works both ways, so a mail can be put back to unread.
 - **Stars**, shown where you set them and settable from the panel. The slot
   stays empty rather than absent, so the ages line up down one column.
+- **A trash button** on the row under the pointer, next to the star, for
+  moving one message to Trash with the mouse. Trash is recoverable; nothing
+  is permanently deleted.
 - **A paperclip** on anything carrying an attachment.
 - **Your own labels** as chips in front of the subject, resolved from label id
   to the name you gave it. Gmail's own bookkeeping - `INBOX`, the category
@@ -104,6 +107,7 @@ over: `gws auth logout`.
 | Click a message | open it in the browser and mark it read |
 | Click its dot | mark it read, or put it back to unread |
 | Click its star | star or unstar it, panel stays open |
+| Click its trash can | move it to Trash |
 | `↑` `↓` or `j` `k` | move through the list |
 | `Enter`, `Space` or `o` | open the message under the cursor |
 | `s` | star or unstar it |
