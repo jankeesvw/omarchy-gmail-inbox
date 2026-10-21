@@ -64,6 +64,7 @@ Panel {
   readonly property string iconDotOpen: "\uF10C"
   readonly property string iconCheck: "\uF00C"
   readonly property string iconExternal: "\uF08E"
+  readonly property string iconTrash: "\uF1F8"
   readonly property string iconStar: "\uF005"
   readonly property string iconStarEmpty: "\uF006"
   readonly property string iconClip: "\uF0C6"
@@ -74,6 +75,7 @@ Panel {
   // A full inbox is normal, not an alarm, so the badge takes the theme accent
   // rather than the bar's urgent red.
   readonly property color accent: Commons.Color.accent
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   // The one colour here that does not come from the theme. A star is amber in
   // every mail client there is, and a star in the theme's accent would be
   // indistinguishable from the unread dot right beside it.
@@ -987,7 +989,7 @@ Panel {
                   // not.
                   Item {
                     id: starSlot
-                    anchors.right: age.left
+                    anchors.right: trashSlot.left
                     anchors.rightMargin: Style.space(6)
                     anchors.verticalCenter: parent.verticalCenter
                     width: Style.space(14)
@@ -1009,6 +1011,48 @@ Panel {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
                       onClicked: root.toggleStar(row.modelData)
+                    }
+                  }
+
+                  // Trash, the mouse's `#`. A reserved slot like the star's,
+                  // so nothing shifts as the pointer moves down the list, and
+                  // only drawn on the row under the cursor: a row of bins
+                  // down the whole list would read as a threat. It is faint
+                  // until the pointer is on the bin itself, and red then, so
+                  // a click that lands on it is never a surprise. Trash is
+                  // recoverable, which is why there is no confirmation.
+                  Item {
+                    id: trashSlot
+                    anchors.right: age.left
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(14)
+                    height: Style.space(14)
+
+                    Text {
+                      anchors.centerIn: parent
+                      visible: row.active
+                      text: root.iconTrash
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: trashMouse.containsMouse
+                        ? root.urgent
+                        : Qt.darker(root.foreground, 1.9)
+                    }
+
+                    MouseArea {
+                      id: trashMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.trashMessage(row.modelData)
+                    }
+
+                    PanelToolTip {
+                      visible: trashMouse.containsMouse
+                      text: "Move to Trash"
+                      fontFamily: root.fontFamily
                     }
                   }
 
